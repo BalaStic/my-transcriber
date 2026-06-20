@@ -175,7 +175,6 @@ python transcribe.py -i large_movie.mp4 -f srt
 ✅ **Resilience**: If one chunk fails, others still succeed
 ✅ **Progress tracking**: See exactly which chunk is being processed
 ✅ **Automatic cleanup**: No manual file management needed
-```
 
 ## ⚙️ Configuration
 
