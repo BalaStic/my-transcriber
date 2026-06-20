@@ -30,7 +30,7 @@ A powerful, fast, and secure audio/video transcription application powered by Go
    ```bash
    git clone https://github.com/yourusername/my-transcriber.git
    cd my-transcriber
-   ```
+```text
 
 2. **Install Python dependencies**:
    ```bash
