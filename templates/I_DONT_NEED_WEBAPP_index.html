@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Video & Audio Transcriber</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons CDN -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .drag-over {
+            border-color: #3b82f6 !important;
+            background-color: #eff6ff !important;
+        }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen flex flex-col text-slate-800">
+
+    <!-- Header / Navbar -->
+    <header class="bg-white border-b border-slate-200 sticky top-0 z-10 shadow-sm">
+        <div class="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <div class="bg-blue-600 p-2 rounded-xl text-white shadow-md shadow-blue-200">
+                    <i data-lucide="video" class="w-6 h-6"></i>
+                </div>
+                <div>
+                    <h1 class="text-xl font-bold text-slate-900 tracking-tight">Gemini Transcriber</h1>
+                    <p class="text-xs text-slate-500">Powered by Gemini 2.5 Flash & FFmpeg</p>
+                </div>
+            </div>
+            <div class="flex items-center space-x-2 text-xs font-semibold bg-slate-100 text-slate-600 px-3 py-1.5 rounded-full">
+                <span class="w-2 h-2 bg-green-500 rounded-full animate-ping"></span>
+                <span>API Status: Connected</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="flex-grow max-w-5xl w-full mx-auto px-4 py-8">
+        
+        <!-- Welcome banner -->
+        <div class="mb-8 text-center sm:text-left">
+            <h2 class="text-3xl font-extrabold text-slate-900 leading-tight">Video & Audio Transcription</h2>
+            <p class="text-slate-600 mt-2 max-w-2xl">
+                Upload any video or audio file. We compress the audio on-the-fly and leverage Gemini's advanced multimodal engine to deliver blazing fast, highly precise transcriptions, subtitles, or structured JSON.
+            </p>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-8">
+            
+            <!-- Left Side: Control & Upload panel -->
+            <div class="lg:col-span-5 space-y-6">
+                <div class="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
+                    <h3 class="text-lg font-bold text-slate-900 flex items-center">
+                        <i data-lucide="sliders" class="w-5 h-5 text-blue-600 mr-2"></i>
+                        Configuration
+                    </h3>
+
+                    <form id="transcribe-form" class="space-y-6">
+                        <!-- File Upload Zone -->
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-2">Upload Media File</label>
+                            <div id="drop-zone" class="border-2 border-dashed border-slate-300 rounded-xl p-6 text-center cursor-pointer hover:border-blue-500 hover:bg-slate-50 transition duration-150 flex flex-col items-center justify-center min-h-[180px]">
+                                <input type="file" id="file-input" class="hidden" accept=".mp4,.avi,.mkv,.mov,.webm,.flv,.wmv,.3gp,.mp3,.wav,.m4a,.aac,.flac,.ogg,.wma,.opus">
+                                <div id="upload-icon" class="bg-blue-50 p-3 rounded-full text-blue-600 mb-3">
+                                    <i data-lucide="cloud-upload" class="w-8 h-8"></i>
+                                </div>
+                                <div id="upload-details" class="space-y-1">
+                                    <p class="text-sm font-semibold text-slate-700">Drag and drop file here</p>
+                                    <p class="text-xs text-slate-500">or click to browse your folders</p>
+                                    <p class="text-[10px] text-slate-400 mt-2">MP4, MKV, MOV, MP3, WAV, AAC (Max 100MB)</p>
+                                </div>
+                                <!-- File selected status -->
+                                <div id="file-selected-status" class="hidden w-full space-y-2">
+                                    <div class="flex items-center space-x-3 bg-slate-50 p-3 rounded-lg border border-slate-200 text-left">
+                                        <div class="bg-blue-100 p-2 rounded text-blue-700" id="file-type-icon-wrapper">
+                                            <i data-lucide="file-video" class="w-6 h-6" id="file-type-icon"></i>
+                                        </div>
+                                        <div class="overflow-hidden flex-grow">
+                                            <p id="selected-file-name" class="text-sm font-medium text-slate-800 truncate"></p>
+                                            <p id="selected-file-size" class="text-xs text-slate-500"></p>
+                                        </div>
+                                    </div>
+                                    <button type="button" id="remove-file-btn" class="text-xs text-red-500 hover:text-red-700 font-medium flex items-center justify-center mx-auto space-x-1">
+                                        <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                                        <span>Choose a different file</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Output Format Selector -->
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-2">Export Format</label>
+                            <div class="grid grid-cols-2 gap-2">
+                                <label class="border border-slate-200 rounded-xl p-3 flex items-center space-x-3 cursor-pointer hover:bg-slate-50 transition peer-checked:border-blue-600 has-[:checked]:border-blue-600 has-[:checked]:bg-blue-50/50">
+                                    <input type="radio" name="format" value="txt" checked class="w-4 h-4 text-blue-600 focus:ring-blue-500">
+                                    <div>
+                                        <p class="text-sm font-bold text-slate-800">Plain Text</p>
+                                        <p class="text-[10px] text-slate-500">Plain .txt file</p>
+                                    </div>
+                                </label>
+                                <label class="border border-slate-200 rounded-xl p-3 flex items-center space-x-3 cursor-pointer hover:bg-slate-50 transition has-[:checked]:border-blue-600 has-[:checked]:bg-blue-50/50">
+                                    <input type="radio" name="format" value="srt" class="w-4 h-4 text-blue-600 focus:ring-blue-500">
+                                    <div>
+                                        <p class="text-sm font-bold text-slate-800">Subtitles SRT</p>
+                                        <p class="text-[10px] text-slate-500">Standard subtitle format</p>
+                                    </div>
+                                </label>
+                                <label class="border border-slate-200 rounded-xl p-3 flex items-center space-x-3 cursor-pointer hover:bg-slate-50 transition has-[:checked]:border-blue-600 has-[:checked]:bg-blue-50/50">
+                                    <input type="radio" name="format" value="vtt" class="w-4 h-4 text-blue-600 focus:ring-blue-500">
+                                    <div>
+                                        <p class="text-sm font-bold text-slate-800">WebVTT</p>
+                                        <p class="text-[10px] text-slate-500">Web-friendly .vtt file</p>
+                                    </div>
+                                </label>
+                                <label class="border border-slate-200 rounded-xl p-3 flex items-center space-x-3 cursor-pointer hover:bg-slate-50 transition has-[:checked]:border-blue-600 has-[:checked]:bg-blue-50/50">
+                                    <input type="radio" name="format" value="json" class="w-4 h-4 text-blue-600 focus:ring-blue-500">
+                                    <div>
+                                        <p class="text-sm font-bold text-slate-800">JSON</p>
+                                        <p class="text-[10px] text-slate-500">Structured segments</p>
+                                    </div>
+                                </label>
+                            </div>
+                        </div>
+
+                        <!-- Prompt Hints -->
+                        <div>
+                            <div class="flex justify-between items-center mb-1">
+                                <label class="block text-sm font-semibold text-slate-700">Custom Guidelines (Optional)</label>
+                                <span class="text-[10px] text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full font-medium">Advanced</span>
+                            </div>
+                            <textarea id="prompt-input" rows="3" class="w-full border border-slate-300 rounded-xl p-3 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition" placeholder="e.g. 'The audio is in Spanish, transcribe in Spanish' or 'Please partition the text into paragraphs and correct any industry jargon.'"></textarea>
+                        </div>
+
+                        <!-- Action Button -->
+                        <button type="submit" id="submit-btn" disabled class="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-semibold py-3 px-4 rounded-xl shadow-lg shadow-blue-100 hover:shadow-xl transition duration-150 flex items-center justify-center space-x-2">
+                            <i data-lucide="wand-2" class="w-5 h-5"></i>
+                            <span>Start Transcription</span>
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Right Side: Status & Transcription Output area -->
+            <div class="lg:col-span-7 flex flex-col h-full">
+                
+                <!-- Initial Empty State -->
+                <div id="output-empty-state" class="bg-white p-12 rounded-2xl border border-slate-200 shadow-sm text-center flex flex-col items-center justify-center flex-grow min-h-[450px]">
+                    <div class="bg-slate-100 p-4 rounded-2xl text-slate-400 mb-4">
+                        <i data-lucide="file-text" class="w-12 h-12"></i>
+                    </div>
+                    <h4 class="text-lg font-bold text-slate-800">Transcription Result</h4>
+                    <p class="text-sm text-slate-500 mt-2 max-w-md mx-auto">
+                        Once you select a media file and configure your options, your completed transcript, timestamps, and export options will appear here.
+                    </p>
+                </div>
+
+                <!-- Loading State -->
+                <div id="output-loading-state" class="hidden bg-white p-12 rounded-2xl border border-slate-200 shadow-sm text-center flex flex-col items-center justify-center flex-grow min-h-[450px] space-y-6">
+                    <div class="relative w-20 h-20">
+                        <!-- Spinner outer ring -->
+                        <div class="absolute inset-0 rounded-full border-4 border-slate-100"></div>
+                        <!-- Spinner colored ring -->
+                        <div class="absolute inset-0 rounded-full border-4 border-blue-600 border-t-transparent animate-spin"></div>
+                    </div>
+                    <div class="space-y-2">
+                        <h4 class="text-lg font-bold text-slate-800" id="loading-title">Processing file...</h4>
+                        <p class="text-sm text-slate-500 max-w-xs mx-auto" id="loading-description">
+                            Please wait. This may take up to a minute depending on the duration of your media file.
+                        </p>
+                    </div>
+                    <!-- Status Steps -->
+                    <div class="max-w-xs w-full bg-slate-50 border border-slate-100 rounded-xl p-4 text-left space-y-3 mx-auto text-xs">
+                        <div class="flex items-center space-x-2.5 text-slate-400" id="step-upload">
+                            <i data-lucide="check-circle-2" class="w-4 h-4 text-slate-300"></i>
+                            <span>Uploading video file</span>
+                        </div>
+                        <div class="flex items-center space-x-2.5 text-slate-400" id="step-ffmpeg">
+                            <i data-lucide="circle-dashed" class="w-4 h-4 animate-spin text-blue-500 hidden" id="step-ffmpeg-spinner"></i>
+                            <i data-lucide="check-circle-2" class="w-4 h-4 text-slate-300" id="step-ffmpeg-check"></i>
+                            <span>Extracting compressed audio (ffmpeg)</span>
+                        </div>
+                        <div class="flex items-center space-x-2.5 text-slate-400" id="step-gemini">
+                            <i data-lucide="circle-dashed" class="w-4 h-4 animate-spin text-blue-500 hidden" id="step-gemini-spinner"></i>
+                            <i data-lucide="check-circle-2" class="w-4 h-4 text-slate-300" id="step-gemini-check"></i>
+                            <span>Processing transcription with Gemini API</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Finished Transcript State -->
+                <div id="output-success-state" class="hidden bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col flex-grow min-h-[500px] overflow-hidden">
+                    
+                    <!-- Metadata Header -->
+                    <div class="bg-slate-50 border-b border-slate-200 p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                        <div class="space-y-1">
+                            <div class="flex items-center space-x-2">
+                                <span class="bg-blue-100 text-blue-800 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md" id="result-badge">TXT</span>
+                                <h4 class="text-sm font-bold text-slate-800 truncate max-w-xs sm:max-w-md" id="result-filename">video_sample.mp4</h4>
+                            </div>
+                            <p class="text-xs text-slate-500">
+                                Media Duration: <span class="font-semibold text-slate-700" id="result-duration">00:00</span>
+                            </p>
+                        </div>
+                        <div class="flex items-center space-x-2 w-full sm:w-auto">
+                            <button id="copy-btn" class="flex-grow sm:flex-grow-0 bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 text-xs font-semibold px-3 py-2 rounded-lg transition flex items-center justify-center space-x-1.5 shadow-sm">
+                                <i data-lucide="copy" class="w-4 h-4"></i>
+                                <span id="copy-btn-text">Copy</span>
+                            </button>
+                            <button id="download-btn" class="flex-grow sm:flex-grow-0 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold px-3 py-2 rounded-lg transition flex items-center justify-center space-x-1.5 shadow-md shadow-blue-100">
+                                <i data-lucide="download" class="w-4 h-4"></i>
+                                <span>Download</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Transcript Content Textbox -->
+                    <div class="p-6 flex-grow flex flex-col relative bg-slate-950">
+                        <textarea id="transcript-output" readonly class="w-full flex-grow bg-transparent text-slate-200 font-mono text-sm leading-relaxed outline-none resize-none overflow-y-auto whitespace-pre-wrap min-h-[300px]" placeholder="Transcription output..."></textarea>
+                    </div>
+
+                    <!-- Reset Footer -->
+                    <div class="border-t border-slate-200 p-4 bg-slate-50 text-right">
+                        <button id="reset-btn" class="text-xs text-slate-500 hover:text-slate-800 font-semibold flex items-center space-x-1.5 ml-auto">
+                            <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+                            <span>Transcribe another file</span>
+                        </button>
+                    </div>
+                </div>
+
+            </div>
+
+        </div>
+
+    </main>
+
+    <!-- Footer -->
+    <footer class="bg-white border-t border-slate-200 py-6 mt-12">
+        <div class="max-w-6xl mx-auto px-4 text-center space-y-2">
+            <p class="text-sm text-slate-500 font-medium">Video & Audio Transcriber Application</p>
+            <p class="text-xs text-slate-400">
+                Built with Python 3, Flask, FFmpeg, and the Gemini API. Standard auto-authentication configured.
+            </p>
+        </div>
+    </footer>
+
+    <!-- Interactive script -->
+    <script>
+        // Initialize Lucide icons
+        lucide.createIcons();
+
+        // Dom Elements
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        const uploadIcon = document.getElementById('upload-icon');
+        const uploadDetails = document.getElementById('upload-details');
+        const fileSelectedStatus = document.getElementById('file-selected-status');
+        const fileTypeIcon = document.getElementById('file-type-icon');
+        const fileTypeIconWrapper = document.getElementById('file-type-icon-wrapper');
+        const selectedFileName = document.getElementById('selected-file-name');
+        const selectedFileSize = document.getElementById('selected-file-size');
+        const removeFileBtn = document.getElementById('remove-file-btn');
+        const submitBtn = document.getElementById('submit-btn');
+        const transcribeForm = document.getElementById('transcribe-form');
+        const promptInput = document.getElementById('prompt-input');
+
+        // Output State elements
+        const outputEmptyState = document.getElementById('output-empty-state');
+        const outputLoadingState = document.getElementById('output-loading-state');
+        const outputSuccessState = document.getElementById('output-success-state');
+        
+        // Loading sub-indicators
+        const loadingTitle = document.getElementById('loading-title');
+        const loadingDescription = document.getElementById('loading-description');
+        const stepUpload = document.getElementById('step-upload');
+        const stepFfmpeg = document.getElementById('step-ffmpeg');
+        const stepFfmpegSpinner = document.getElementById('step-ffmpeg-spinner');
+        const stepFfmpegCheck = document.getElementById('step-ffmpeg-check');
+        const stepGemini = document.getElementById('step-gemini');
+        const stepGeminiSpinner = document.getElementById('step-gemini-spinner');
+        const stepGeminiCheck = document.getElementById('step-gemini-check');
+
+        // Success state elements
+        const resultBadge = document.getElementById('result-badge');
+        const resultFilename = document.getElementById('result-filename');
+        const resultDuration = document.getElementById('result-duration');
+        const transcriptOutput = document.getElementById('transcript-output');
+        const copyBtn = document.getElementById('copy-btn');
+        const copyBtnText = document.getElementById('copy-btn-text');
+        const downloadBtn = document.getElementById('download-btn');
+        const resetBtn = document.getElementById('reset-btn');
+
+        let activeFile = null;
+        let transcriptionResult = null;
+
+        // Utilities
+        function formatBytes(bytes, decimals = 2) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const dm = decimals < 0 ? 0 : decimals;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+        }
+
+        // Drag and Drop listeners
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropZone.addEventListener(eventName, (e) => {
+                e.preventDefault();
+                dropZone.classList.add('drag-over');
+            }, false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, (e) => {
+                e.preventDefault();
+                dropZone.classList.remove('drag-over');
+            }, false);
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            if (files.length) {
+                handleFileSelect(files[0]);
+            }
+        });
+
+        dropZone.addEventListener('click', () => {
+            fileInput.click();
+        });
+
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length) {
+                handleFileSelect(fileInput.files[0]);
+            }
+        });
+
+        function handleFileSelect(file) {
+            activeFile = file;
+            
+            // UI elements switch
+            uploadIcon.classList.add('hidden');
+            uploadDetails.classList.add('hidden');
+            fileSelectedStatus.classList.remove('hidden');
+            
+            // Show details
+            selectedFileName.textContent = file.name;
+            selectedFileSize.textContent = formatBytes(file.size);
+            
+            // Check if audio or video to change icon
+            const isAudio = file.type.startsWith('audio/') || ['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus'].some(ext => file.name.toLowerCase().endsWith(ext));
+            if (isAudio) {
+                fileTypeIcon.setAttribute('data-lucide', 'music');
+                fileTypeIconWrapper.className = "bg-emerald-100 p-2 rounded text-emerald-700";
+            } else {
+                fileTypeIcon.setAttribute('data-lucide', 'file-video');
+                fileTypeIconWrapper.className = "bg-blue-100 p-2 rounded text-blue-700";
+            }
+            lucide.createIcons();
+
+            submitBtn.disabled = false;
+        }
+
+        removeFileBtn.addEventListener('click', (e) => {
+            e.stopPropagation(); // Avoid triggering file selection dialog
+            clearSelectedFile();
+        });
+
+        function clearSelectedFile() {
+            activeFile = null;
+            fileInput.value = '';
+            uploadIcon.classList.remove('hidden');
+            uploadDetails.classList.remove('hidden');
+            fileSelectedStatus.classList.add('hidden');
+            submitBtn.disabled = true;
+        }
+
+        // Transcription workflow
+        transcribeForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!activeFile) return;
+
+            // Shift output display states
+            outputEmptyState.classList.add('hidden');
+            outputSuccessState.classList.add('hidden');
+            outputLoadingState.classList.remove('hidden');
+
+            // Reset step indicators
+            setStepState(stepUpload, 'active', 'Uploading file...');
+            setStepState(stepFfmpeg, 'pending');
+            setStepState(stepGemini, 'pending');
+
+            // Collect variables
+            const format = document.querySelector('input[name="format"]:checked').value;
+            const promptText = promptInput.value;
+
+            // Form data assembly
+            const formData = new FormData();
+            formData.append('file', activeFile);
+            formData.append('format', format);
+            formData.append('prompt', promptText);
+
+            try {
+                // Perform upload & transcribe API request
+                loadingTitle.textContent = "Uploading & Preparing...";
+                loadingDescription.textContent = "The file is being uploaded to the server. Larger files take longer to transfer.";
+                
+                const xhr = new XMLHttpRequest();
+                
+                // Monitor upload progress
+                xhr.upload.addEventListener('progress', (e) => {
+                    if (e.lengthComputable) {
+                        const pct = Math.round((e.loaded / e.total) * 100);
+                        loadingTitle.textContent = `Uploading file (${pct}%)`;
+                        if (pct === 100) {
+                            // File fully uploaded, now moving to backend processing
+                            setStepState(stepUpload, 'success', 'Uploaded successfully!');
+                            setStepState(stepFfmpeg, 'active', 'Running ffmpeg...');
+                            loadingTitle.textContent = "Extracting Audio...";
+                            loadingDescription.textContent = "FFmpeg is compressing your media into a lightweight mono voice stream.";
+                        }
+                    }
+                });
+
+                // Wrap response in Promise
+                const apiPromise = new Promise((resolve, reject) => {
+                    xhr.onreadystatechange = () => {
+                        if (xhr.readyState === XMLHttpRequest.DONE) {
+                            if (xhr.status === 200) {
+                                resolve(JSON.parse(xhr.responseText));
+                            } else {
+                                try {
+                                    const err = JSON.parse(xhr.responseText);
+                                    reject(new Error(err.error || "Internal Server Error"));
+                                } catch {
+                                    reject(new Error(`Server returned status code ${xhr.status}`));
+                                }
+                            }
+                        }
+                    };
+                    
+                    xhr.onerror = () => reject(new Error("Network Error occurred."));
+                });
+
+                xhr.open('POST', '/api/transcribe', true);
+                xhr.send(formData);
+
+                // Polling steps simulation or real updates
+                // Since this is standard HTTP, let's update statuses dynamically based on timing thresholds
+                let timeSpent = 0;
+                const interval = setInterval(() => {
+                    timeSpent += 1;
+                    if (timeSpent === 4 && xhr.readyState < XMLHttpRequest.DONE) {
+                        setStepState(stepFfmpeg, 'success', 'Audio extracted and compressed!');
+                        setStepState(stepGemini, 'active', 'Transcribing with Gemini...');
+                        loadingTitle.textContent = "Analyzing with Gemini...";
+                        loadingDescription.textContent = "Gemini 2.5 Flash is actively processing the audio stream to generate the transcript.";
+                    }
+                }, 1000);
+
+                const response = await apiPromise;
+                clearInterval(interval);
+
+                // Complete steps
+                setStepState(stepUpload, 'success');
+                setStepState(stepFfmpeg, 'success');
+                setStepState(stepGemini, 'success', 'Completed transcription!');
+
+                // Show success view
+                transcriptionResult = response;
+                showSuccessState(response);
+
+            } catch (err) {
+                console.error(err);
+                alert(`Transcription failed: ${err.message}`);
+                
+                // Reset back to empty state
+                outputLoadingState.classList.add('hidden');
+                outputEmptyState.classList.remove('hidden');
+            }
+        });
+
+        function setStepState(element, state, customText = null) {
+            // Remove previous states
+            element.classList.remove('text-slate-400', 'text-blue-600', 'text-green-600', 'font-medium');
+            
+            const checkIcon = element.querySelector('i[data-lucide="check-circle-2"]');
+            const spinnerIcon = element.querySelector('i[id$="-spinner"]');
+            const checkStatic = element.querySelector('i[id$="-check"]');
+            const labelSpan = element.querySelector('span');
+
+            if (customText) {
+                labelSpan.textContent = customText;
+            }
+
+            if (state === 'pending') {
+                element.classList.add('text-slate-400');
+                if (checkIcon) checkIcon.className = "w-4 h-4 text-slate-300";
+                if (spinnerIcon) spinnerIcon.classList.add('hidden');
+                if (checkStatic) checkStatic.classList.remove('hidden');
+            } else if (state === 'active') {
+                element.classList.add('text-blue-600', 'font-medium');
+                if (checkIcon) checkIcon.className = "hidden";
+                if (spinnerIcon) spinnerIcon.classList.remove('hidden');
+                if (checkStatic) checkStatic.classList.add('hidden');
+            } else if (state === 'success') {
+                element.classList.add('text-green-600', 'font-medium');
+                if (checkIcon) {
+                    checkIcon.className = "w-4 h-4 text-green-500";
+                } else if (checkStatic) {
+                    checkStatic.className = "w-4 h-4 text-green-500";
+                }
+                if (spinnerIcon) spinnerIcon.classList.add('hidden');
+            }
+            lucide.createIcons();
+        }
+
+        function showSuccessState(data) {
+            outputLoadingState.classList.add('hidden');
+            outputSuccessState.classList.remove('hidden');
+
+            resultBadge.textContent = data.format;
+            resultFilename.textContent = data.filename;
+            resultDuration.textContent = data.duration_str;
+            transcriptOutput.value = data.transcript;
+            
+            // Adjust scroll
+            transcriptOutput.scrollTop = 0;
+        }
+
+        // Copy Clipboard Button
+        copyBtn.addEventListener('click', async () => {
+            if (!transcriptionResult) return;
+            try {
+                await navigator.clipboard.writeText(transcriptOutput.value);
+                copyBtnText.textContent = "Copied!";
+                copyBtn.classList.replace('bg-white', 'bg-green-50');
+                copyBtn.classList.replace('text-slate-700', 'text-green-700');
+                copyBtn.classList.add('border-green-300');
+                
+                setTimeout(() => {
+                    copyBtnText.textContent = "Copy";
+                    copyBtn.classList.replace('bg-green-50', 'bg-white');
+                    copyBtn.classList.replace('text-green-700', 'text-slate-700');
+                    copyBtn.classList.remove('border-green-300');
+                }, 2000);
+            } catch (err) {
+                alert('Could not copy transcript: ' + err);
+            }
+        });
+
+        // Download Transcript Button
+        downloadBtn.addEventListener('click', async () => {
+            if (!transcriptionResult) return;
+            
+            try {
+                const response = await fetch('/api/download', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        transcript: transcriptOutput.value,
+                        filename: transcriptionResult.filename,
+                        format: transcriptionResult.format
+                    })
+                });
+
+                if (!response.ok) throw new Error("Download server error.");
+
+                // Create a temporal blob link and click it to download
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = url;
+                
+                // Set file name
+                const originalBase = transcriptionResult.filename.substring(0, transcriptionResult.filename.lastIndexOf('.')) || transcriptionResult.filename;
+                a.download = `${originalBase}.${transcriptionResult.format}`;
+                
+                document.body.appendChild(a);
+                a.click();
+                
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+            } catch (err) {
+                alert('Failed to trigger file download: ' + err.message);
+            }
+        });
+
+        // Reset Button
+        resetBtn.addEventListener('click', () => {
+            transcriptionResult = null;
+            clearSelectedFile();
+            outputSuccessState.classList.add('hidden');
+            outputEmptyState.classList.remove('hidden');
+            promptInput.value = '';
+        });
+    </script>
+</body>
+</html>
