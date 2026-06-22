@@ -2,7 +2,8 @@ import os
 import tempfile
 import shutil
 from flask import Flask, render_template, request, jsonify, send_file, make_response
-from transcriber import transcribe_file, get_media_duration
+from transcriber import transcribe_file, get_media_duration, GeminiAPIError
+from summary import TranscriptionSummary
 from config import (
     MAX_CONTENT_LENGTH, ALLOWED_EXTENSIONS, SUPPORTED_OUTPUT_FORMATS,
     FLASK_HOST, FLASK_PORT, FLASK_DEBUG
@@ -86,11 +87,15 @@ def api_transcribe():
     
     temp_file_path = os.path.join(UPLOAD_FOLDER, f"upload_{os.urandom(8).hex()}{ext}")
     
+    # Initialize summary (will be populated even if transcription fails)
+    summary = None
+    
     try:
         logger.info(f"Saving uploaded file '{filename}' to {temp_file_path}...")
         file.save(temp_file_path)
         
-        # Get file duration
+        # Get file size and duration
+        file_size_mb = os.path.getsize(temp_file_path) / (1024 * 1024)
         duration = get_media_duration(temp_file_path)
         duration_str = "Unknown"
         if duration is not None:
@@ -100,6 +105,14 @@ def api_transcribe():
             
         logger.info(f"Uploaded file saved successfully. Duration: {duration_str}")
         
+        # Create summary tracker
+        summary = TranscriptionSummary(
+            filename=filename,
+            file_size_mb=file_size_mb,
+            duration_seconds=duration,
+            output_format=output_format
+        )
+        
         # Perform transcription
         logger.info(f"Starting transcription for '{filename}' (format: {output_format})...")
         transcript = transcribe_file(
@@ -108,6 +121,10 @@ def api_transcribe():
             prompt_enhancement=prompt_enhancement
         )
         
+        # Mark success and record output length
+        summary.output_length = len(transcript)
+        summary.mark_complete(success=True)
+        
         logger.info(f"Transcription completed for '{filename}'")
         return jsonify({
             'success': True,
@@ -115,18 +132,67 @@ def api_transcribe():
             'duration_seconds': duration,
             'duration_str': duration_str,
             'transcript': transcript,
-            'format': output_format
+            'format': output_format,
+            'summary': summary.to_dict()
         })
+        
+    except GeminiAPIError as e:
+        # Specific handling for Gemini API errors
+        logger.error(f"Gemini API error ({e.error_type}): {e}")
+        
+        if summary:
+            summary.set_api_error(e.error_type, str(e))
+            summary.mark_complete(success=False)
+        
+        # Return detailed error information
+        error_response = {
+            'error': str(e),
+            'error_type': e.error_type
+        }
+        
+        if summary:
+            error_response['summary'] = summary.to_dict()
+        
+        return jsonify(error_response), 500
         
     except FileNotFoundError as e:
         logger.error(f"File not found error: {e}")
-        return jsonify({'error': 'File not found during processing'}), 500
+        
+        if summary:
+            summary.add_error(f"File not found: {e}")
+            summary.mark_complete(success=False)
+        
+        error_response = {'error': 'File not found during processing'}
+        if summary:
+            error_response['summary'] = summary.to_dict()
+        
+        return jsonify(error_response), 500
+        
     except ValueError as e:
         logger.error(f"Value error during transcription: {e}")
-        return jsonify({'error': f'Transcription failed: {str(e)}'}), 500
+        
+        if summary:
+            summary.add_error(f"Value error: {e}")
+            summary.mark_complete(success=False)
+        
+        error_response = {'error': f'Transcription failed: {str(e)}'}
+        if summary:
+            error_response['summary'] = summary.to_dict()
+        
+        return jsonify(error_response), 500
+        
     except Exception as e:
         logger.error(f"Unexpected error in /api/transcribe: {e}", exc_info=True)
-        return jsonify({'error': f'An unexpected error occurred: {str(e)}'}), 500
+        
+        if summary:
+            summary.add_error(f"Unexpected error: {e}")
+            summary.mark_complete(success=False)
+        
+        error_response = {'error': f'An unexpected error occurred: {str(e)}'}
+        if summary:
+            error_response['summary'] = summary.to_dict()
+        
+        return jsonify(error_response), 500
         
     finally:
         # IMPROVED CLEANUP: Remove race condition

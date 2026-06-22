@@ -5,7 +5,7 @@ import base64
 import tempfile
 import subprocess
 import requests
-from typing import Optional
+from typing import Optional, Tuple
 
 from config import (
     GEMINI_API_BASE_URL, GEMINI_API_KEY, GEMINI_TEMPERATURE,
@@ -15,6 +15,23 @@ from config import (
 from logger import setup_logger
 
 logger = setup_logger(__name__)
+
+
+class GeminiAPIError(Exception):
+    """Custom exception for Gemini API errors with detailed information."""
+    
+    def __init__(self, message: str, error_type: str = "UNKNOWN", response_data: dict = None):
+        """
+        Initialize Gemini API error.
+        
+        Args:
+            message: Human-readable error message
+            error_type: Error type code (CONTENT_BLOCKED, QUOTA_EXCEEDED, etc.)
+            response_data: Full API response for debugging
+        """
+        super().__init__(message)
+        self.error_type = error_type
+        self.response_data = response_data or {}
 
 def get_media_duration(file_path: str) -> Optional[float]:
     """
@@ -117,6 +134,116 @@ def is_audio_file(file_path: str) -> bool:
     _, ext = os.path.splitext(file_path.lower())
     return ext in AUDIO_EXTENSIONS
 
+
+def _parse_api_error(response) -> Tuple[str, str]:
+    """
+    Parse API error response to extract error type and message.
+    
+    Args:
+        response: The HTTP response object from the API
+        
+    Returns:
+        Tuple of (error_type, error_message)
+    """
+    try:
+        error_json = response.json()
+        
+        # Check for standard error format
+        if "error" in error_json:
+            error_obj = error_json["error"]
+            if isinstance(error_obj, dict):
+                message = error_obj.get("message", response.text)
+                code = error_obj.get("code", response.status_code)
+                status = error_obj.get("status", "")
+                
+                # Determine error type based on status code and message
+                if response.status_code == 429 or "quota" in message.lower():
+                    return "QUOTA_EXCEEDED", f"API quota exceeded: {message}"
+                elif response.status_code == 403:
+                    return "FORBIDDEN", f"Access forbidden: {message}"
+                elif response.status_code == 400:
+                    return "BAD_REQUEST", f"Invalid request: {message}"
+                elif "safety" in message.lower() or "prohibited" in message.lower():
+                    return "CONTENT_BLOCKED", f"Content blocked by safety filters: {message}"
+                else:
+                    return "API_ERROR", message
+        
+    except:
+        pass
+    
+    # Fallback to generic error based on status code
+    if response.status_code == 429:
+        return "QUOTA_EXCEEDED", "API quota exceeded. Please try again later."
+    elif response.status_code == 403:
+        return "FORBIDDEN", "Access forbidden. Check your API key."
+    elif response.status_code == 400:
+        return "BAD_REQUEST", "Invalid request format."
+    else:
+        return "API_ERROR", f"API request failed with status {response.status_code}: {response.text}"
+
+
+def _check_response_for_errors(response_json: dict) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Check response JSON for error indicators.
+    
+    Args:
+        response_json: The parsed JSON response
+        
+    Returns:
+        Tuple of (error_type, error_message) or (None, None) if no error
+    """
+    # Check for top-level error
+    if "error" in response_json:
+        error_obj = response_json["error"]
+        if isinstance(error_obj, dict):
+            message = error_obj.get("message", "Unknown API error")
+            return "API_ERROR", message
+        else:
+            return "API_ERROR", str(error_obj)
+    
+    # Check for promptFeedback (blocked prompts)
+    if "promptFeedback" in response_json:
+        feedback = response_json["promptFeedback"]
+        if "blockReason" in feedback:
+            reason = feedback["blockReason"]
+            return "CONTENT_BLOCKED", f"Prompt was blocked: {reason}"
+    
+    return None, None
+
+
+def _get_blocking_reason_message(finish_reason: str, candidate: dict) -> str:
+    """
+    Get a detailed message explaining why content was blocked.
+    
+    Args:
+        finish_reason: The finish reason from the candidate
+        candidate: The full candidate object
+        
+    Returns:
+        Human-readable error message
+    """
+    messages = {
+        "SAFETY": "Content was blocked by Gemini's safety filters. The audio may contain harmful, dangerous, hateful, or inappropriate content.",
+        "PROHIBITED_CONTENT": "Content was flagged as prohibited. The audio may violate Google's content policies.",
+        "RECITATION": "Content was flagged as potential recitation of copyrighted material."
+    }
+    
+    base_message = messages.get(finish_reason, f"Content was blocked: {finish_reason}")
+    
+    # Add safety ratings if available
+    if "safetyRatings" in candidate:
+        ratings = candidate["safetyRatings"]
+        blocked_categories = []
+        for rating in ratings:
+            if isinstance(rating, dict) and rating.get("blocked", False):
+                category = rating.get("category", "UNKNOWN")
+                blocked_categories.append(category)
+        
+        if blocked_categories:
+            base_message += f"\nBlocked categories: {', '.join(blocked_categories)}"
+    
+    return base_message
+
 def query_gemini_transcription(audio_path: str, output_format: str = "txt", 
                                prompt_enhancement: Optional[str] = None) -> str:
     """
@@ -213,40 +340,80 @@ def query_gemini_transcription(audio_path: str, output_format: str = "txt",
     
     if response.status_code != 200:
         logger.error(f"Gemini API request failed with status {response.status_code}")
-        raise ValueError(f"Gemini API request failed with status {response.status_code}: {response.text}")
+        error_type, error_msg = _parse_api_error(response)
+        raise GeminiAPIError(error_msg, error_type=error_type, response_data={"status": response.status_code, "text": response.text})
     
     # IMPROVED ERROR HANDLING: Validate response structure
     try:
         response_json = response.json()
     except json.JSONDecodeError as e:
         logger.error(f"Failed to decode JSON response: {e}")
-        raise ValueError(f"Invalid JSON response from Gemini API: {response.text}")
+        raise GeminiAPIError(
+            f"Invalid JSON response from Gemini API: {response.text}", 
+            error_type="INVALID_RESPONSE"
+        )
+    
+    # Check for API errors in the response
+    error_type, error_msg = _check_response_for_errors(response_json)
+    if error_type:
+        logger.error(f"API returned error: {error_type} - {error_msg}")
+        raise GeminiAPIError(error_msg, error_type=error_type, response_data=response_json)
     
     # Validate response structure with defensive checks
     if not isinstance(response_json, dict):
-        raise ValueError("API response is not a JSON object")
+        raise GeminiAPIError("API response is not a JSON object", error_type="INVALID_RESPONSE")
     
     if "candidates" not in response_json:
-        raise ValueError(f"No 'candidates' in API response: {response_json}")
+        raise GeminiAPIError(
+            f"No 'candidates' in API response: {response_json}", 
+            error_type="INVALID_RESPONSE",
+            response_data=response_json
+        )
     
     candidates = response_json["candidates"]
     if not candidates or len(candidates) == 0:
-        raise ValueError("No candidates in API response")
+        raise GeminiAPIError("No candidates in API response", error_type="INVALID_RESPONSE")
     
     candidate = candidates[0]
+    
+    # Check for content filtering/blocking
+    if "finishReason" in candidate:
+        finish_reason = candidate["finishReason"]
+        if finish_reason in ["SAFETY", "PROHIBITED_CONTENT", "RECITATION"]:
+            error_msg = _get_blocking_reason_message(finish_reason, candidate)
+            logger.error(f"Content blocked by API: {finish_reason}")
+            raise GeminiAPIError(error_msg, error_type="CONTENT_BLOCKED", response_data=response_json)
+    
     if "content" not in candidate:
-        raise ValueError(f"No 'content' in candidate: {candidate}")
+        # Check if there's a safety rating or other reason for no content
+        if "safetyRatings" in candidate:
+            error_msg = "Content was blocked by safety filters"
+            logger.error(error_msg)
+            raise GeminiAPIError(error_msg, error_type="CONTENT_BLOCKED", response_data=response_json)
+        raise GeminiAPIError(
+            f"No 'content' in candidate: {candidate}", 
+            error_type="INVALID_RESPONSE",
+            response_data=response_json
+        )
     
     content = candidate["content"]
     if "parts" not in content:
-        raise ValueError(f"No 'parts' in content: {content}")
+        raise GeminiAPIError(
+            f"No 'parts' in content: {content}", 
+            error_type="INVALID_RESPONSE",
+            response_data=response_json
+        )
     
     parts = content["parts"]
     if not parts or len(parts) == 0:
-        raise ValueError("No parts in content")
+        raise GeminiAPIError("No parts in content", error_type="INVALID_RESPONSE")
     
     if "text" not in parts[0]:
-        raise ValueError(f"No 'text' in first part: {parts[0]}")
+        raise GeminiAPIError(
+            f"No 'text' in first part: {parts[0]}", 
+            error_type="INVALID_RESPONSE",
+            response_data=response_json
+        )
     
     transcript = parts[0]["text"].strip()
     

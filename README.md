@@ -11,6 +11,9 @@ A powerful, fast, and secure audio/video transcription application powered by Go
 - **CLI Tool**: Command-line interface for batch processing and automation
 - **Large File Support**: Automatic chunking for files over 100MB - handle videos of any size!
 - **Custom Prompts**: Add context-specific instructions to improve transcription accuracy
+- **Comprehensive Summaries**: Detailed end-of-process reports with file info, processing stats, errors, and timing
+- **Enhanced Error Detection**: Specific detection and helpful guidance for API errors (content blocking, quota exceeded, etc.)
+- **Chunk-Level Error Tracking**: See which chunks succeeded/failed in large file processing with detailed error messages
 - **Secure**: Implements security best practices including proper temp file handling, input validation, and structured logging
 
 ## 🚀 Quick Start
@@ -191,6 +194,117 @@ The application can be configured via `config.py`:
 - `GEMINI_API_KEY`: Your Gemini API key (required)
 - `LOG_LEVEL`: Logging verbosity - DEBUG, INFO, WARNING, ERROR (default: INFO)
 
+## 📊 Summary & Error Reporting
+
+Every transcription generates a comprehensive summary showing exactly what happened during processing.
+
+### Summary Information Tracked
+
+- **Input Details**: Filename, file size, duration
+- **Processing Mode**: Single-file or chunked processing
+- **Results**: Output format, character count, success/failure status
+- **Timing**: Total processing time
+- **Errors & Warnings**: Detailed error messages with helpful guidance
+- **Chunk Statistics**: For large files, see which chunks succeeded/failed
+
+### Example Summary Output
+
+```
+TRANSCRIPTION SUMMARY
+Status: ✓ SUCCESS
+
+Input File:
+  Name: lecture.mp4
+  Size: 125.50 MB
+  Duration: 45:30
+
+Processing:
+  Mode: Chunked (15-minute chunks)
+  Total Chunks: 3
+  Successful: 3/3
+  Format: SRT
+
+Output:
+  Length: 24,567 characters
+
+✓ No errors or warnings
+
+Processing Time: 3m 45s
+```
+
+### API Error Detection
+
+The system specifically detects and provides helpful guidance for:
+
+#### Content Blocked (CONTENT_BLOCKED)
+```
+🚫 API ERROR DETAILS:
+  Type: CONTENT_BLOCKED
+  Message: Content was blocked by Gemini's safety filters...
+
+  💡 This content was blocked by Gemini's safety filters.
+     The audio may contain prohibited content such as:
+     - Harmful or dangerous content
+     - Hateful or abusive language
+     - Sexually explicit material
+     - Content that violates content policies
+```
+
+#### Quota Exceeded (QUOTA_EXCEEDED)
+```
+🚫 API ERROR DETAILS:
+  Type: QUOTA_EXCEEDED
+  Message: API quota exceeded...
+
+  💡 Your API quota has been exceeded.
+     Please wait and try again later, or check your quota at:
+     https://makersuite.google.com/
+```
+
+#### Recitation Detected (RECITATION)
+```
+🚫 API ERROR DETAILS:
+  Type: RECITATION
+  Message: Content was flagged as potential recitation...
+
+  💡 The content was flagged as potential recitation.
+     This may indicate copyrighted content in the audio.
+```
+
+### Web API Response
+
+When using the web interface, the API returns detailed summary information in JSON format:
+
+```json
+{
+  "success": true,
+  "transcript": "...",
+  "summary": {
+    "filename": "lecture.mp4",
+    "file_size_mb": 125.5,
+    "duration": "45:30",
+    "output_format": "srt",
+    "processing_time": "3m 45s",
+    "errors": [],
+    "warnings": []
+  }
+}
+```
+
+For errors:
+
+```json
+{
+  "error": "Content was blocked by safety filters",
+  "error_type": "CONTENT_BLOCKED",
+  "summary": {
+    "filename": "video.mp4",
+    "errors": ["API Error (CONTENT_BLOCKED): Content was blocked..."],
+    "success": false
+  }
+}
+```
+
 ## 🏗️ Architecture
 
 ```
@@ -198,6 +312,8 @@ my-transcriber/
 ├── app.py              # Flask web application
 ├── transcribe.py       # CLI tool
 ├── transcriber.py      # Core transcription logic
+├── chunk_processor.py  # Large file chunking handler
+├── summary.py          # Transcription summary tracking
 ├── config.py           # Centralized configuration
 ├── logger.py           # Logging setup
 ├── requirements.txt    # Python dependencies
@@ -208,9 +324,11 @@ my-transcriber/
 
 ### Core Components
 
-- **transcriber.py**: Handles audio extraction, compression, and Gemini API communication
-- **app.py**: Flask web server with REST API endpoints
-- **transcribe.py**: Command-line interface wrapper
+- **transcriber.py**: Handles audio extraction, compression, and Gemini API communication with enhanced error detection
+- **chunk_processor.py**: Splits large files into chunks, transcribes each, and merges results with error tracking
+- **summary.py**: Tracks transcription process details, errors, warnings, and generates comprehensive reports
+- **app.py**: Flask web server with REST API endpoints and summary support
+- **transcribe.py**: Command-line interface wrapper with formatted summary output
 - **config.py**: Centralized configuration management
 - **logger.py**: Structured logging setup
 
@@ -276,9 +394,55 @@ Logs include timestamps, module names, and full context for troubleshooting.
 - Verify your `GEMINI_API_KEY` is set correctly
 - Check your API quota at [Google AI Studio](https://makersuite.google.com/)
 
+### "Content blocked by safety filters" (CONTENT_BLOCKED)
+**Cause**: The Gemini API detected content that violates its safety policies.
+
+**Common triggers**:
+- Harmful, dangerous, or violent content
+- Hateful or abusive language
+- Sexually explicit material
+- Content promoting illegal activities
+
+**Solutions**:
+- Review the audio content to ensure it complies with [Google's AI Principles](https://ai.google/responsibility/principles/)
+- If the content is legitimate (e.g., educational, documentary), consider editing or providing additional context via the `--prompt` parameter
+- For false positives, you can report the issue to Google AI support
+
+### "API quota exceeded" (QUOTA_EXCEEDED)
+**Cause**: You've reached your API rate limit or quota.
+
+**Solutions**:
+- Wait for your quota to reset (usually daily or monthly)
+- Check your current usage at [Google AI Studio](https://makersuite.google.com/)
+- Consider upgrading your API plan if you need higher limits
+- For large files with chunking, some chunks may succeed before hitting the limit
+
+### "Recitation detected" (RECITATION)
+**Cause**: The API detected potential copyrighted content in the audio.
+
+**Solutions**:
+- Ensure you have rights to transcribe the content
+- This commonly occurs with music, movie dialogues, or published speeches
+- For legitimate use cases, document your rights to the content
+
+### "Chunk failures in large files"
+**Cause**: One or more chunks failed during chunked processing.
+
+**What happens**:
+- The system continues processing remaining chunks
+- Failed chunks are marked in the summary with specific error messages
+- You get a partial transcription with error markers
+
+**Solutions**:
+- Check the summary to see which chunks failed and why
+- Re-process specific failed chunks by adjusting `--chunk-duration` to split differently
+- If API errors, check quota and content policies
+- For timeout errors, increase timeout values in `config.py`
+
 ### "Timeout during processing"
 - For very long files, increase timeout values in `config.py`
-- Consider splitting large files into smaller segments
+- Consider using chunking mode with `--enable-chunking`
+- Reduce chunk duration with `--chunk-duration` for faster individual processing
 
 ### "Unsupported file type"
 - Check that your file extension is in `ALLOWED_EXTENSIONS`

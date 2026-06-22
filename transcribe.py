@@ -2,8 +2,9 @@
 import os
 import sys
 import argparse
-from transcriber import transcribe_file, get_media_duration
+from transcriber import transcribe_file, get_media_duration, GeminiAPIError
 from chunk_processor import process_large_file_chunked
+from summary import TranscriptionSummary
 from config import (
     SUPPORTED_OUTPUT_FORMATS, ENABLE_CHUNKING, 
     CHUNK_DURATION_MINUTES, CHUNK_THRESHOLD_MB
@@ -74,6 +75,12 @@ def main():
     
     args = parser.parse_args()
     
+    # Check if API key is set before proceeding
+    from config import GEMINI_API_KEY
+    if not GEMINI_API_KEY:
+        print("you forgot to set the API key", file=sys.stderr)
+        sys.exit(1)
+    
     input_path = args.input
     if not os.path.exists(input_path):
         logger.error(f"Input file does not exist: {input_path}")
@@ -103,6 +110,14 @@ def main():
         print(f"File duration: {minutes:02d}:{seconds:02d} ({duration:.2f} seconds)")
         logger.info(f"Media duration: {duration:.2f} seconds")
     
+    # Create summary tracker
+    summary = TranscriptionSummary(
+        filename=os.path.basename(input_path),
+        file_size_mb=file_size_mb,
+        duration_seconds=duration,
+        output_format=args.format
+    )
+    
     # Determine whether to use chunking
     use_chunking = False
     
@@ -118,15 +133,22 @@ def main():
         print(f"\n⚠️  Large file detected ({file_size_mb:.2f}MB)")
         print(f"⚠️  Enabling chunked processing mode")
         print(f"⚠️  Chunk duration: {args.chunk_duration} minutes\n")
+        summary.add_warning(f"Large file ({file_size_mb:.2f}MB) - using chunked processing")
+    
+    # Update summary with chunking info
+    summary.chunked_processing = use_chunking
+    if use_chunking:
+        summary.chunk_duration_minutes = args.chunk_duration
     
     try:
         if use_chunking:
-            # Process using chunking
+            # Process using chunking (will be updated to use summary)
             transcript = process_large_file_chunked(
                 file_path=input_path,
                 output_format=args.format,
                 chunk_duration_minutes=args.chunk_duration,
-                prompt_enhancement=args.prompt
+                prompt_enhancement=args.prompt,
+                summary=summary  # Pass summary for tracking
             )
         else:
             # Process as single file
@@ -135,6 +157,10 @@ def main():
                 output_format=args.format,
                 prompt_enhancement=args.prompt
             )
+        
+        # Record successful completion
+        summary.output_length = len(transcript)
+        summary.mark_complete(success=True)
         
         # Determine output path
         output_path = args.output
@@ -157,18 +183,47 @@ def main():
         print("\n".join(preview_lines))
         if len(preview_lines) < len(transcript.splitlines()):
             print("... [remainder of transcription omitted from preview] ...")
+        
+        # Display comprehensive summary
+        summary.print_summary()
     
+    except GeminiAPIError as e:
+        # Specific handling for Gemini API errors
+        summary.set_api_error(e.error_type, str(e))
+        summary.mark_complete(success=False)
+        logger.error(f"Gemini API error ({e.error_type}): {e}")
+        
+        # Print summary with error details
+        summary.print_summary()
+        
+        print(f"\n❌ Transcription failed due to API error", file=sys.stderr)
+        sys.exit(1)
+        
     except FileNotFoundError as e:
+        summary.add_error(f"File not found: {e}")
+        summary.mark_complete(success=False)
         logger.error(f"File not found: {e}")
-        print(f"\nError: File not found - {e}", file=sys.stderr)
+        
+        summary.print_summary()
+        print(f"\n❌ Error: File not found - {e}", file=sys.stderr)
         sys.exit(1)
+        
     except ValueError as e:
+        summary.add_error(f"Value error: {e}")
+        summary.mark_complete(success=False)
         logger.error(f"Value error during transcription: {e}")
-        print(f"\nError: Transcription failed - {e}", file=sys.stderr)
+        
+        summary.print_summary()
+        print(f"\n❌ Error: Transcription failed - {e}", file=sys.stderr)
         sys.exit(1)
+        
     except Exception as e:
+        summary.add_error(f"Unexpected error: {e}")
+        summary.mark_complete(success=False)
         logger.error(f"Unexpected error: {e}", exc_info=True)
-        print(f"\nError: An unexpected error occurred - {e}", file=sys.stderr)
+        
+        summary.print_summary()
+        print(f"\n❌ Error: An unexpected error occurred - {e}", file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":

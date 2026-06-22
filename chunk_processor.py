@@ -15,7 +15,7 @@ from config import (
     FFMPEG_SAMPLE_RATE, FFMPEG_CHANNELS, FFMPEG_BITRATE
 )
 from logger import setup_logger
-from transcriber import transcribe_file, get_media_duration
+from transcriber import transcribe_file, get_media_duration, GeminiAPIError
 
 logger = setup_logger(__name__)
 
@@ -88,7 +88,8 @@ def split_video_into_chunks(video_path: str, chunk_duration_minutes: int) -> Tup
 
 
 def transcribe_chunks(chunk_files: List[str], output_format: str, 
-                      prompt_enhancement: Optional[str] = None) -> List[Tuple[int, str]]:
+                      prompt_enhancement: Optional[str] = None,
+                      summary=None) -> List[Tuple[int, str]]:
     """
     Transcribe each chunk file.
     
@@ -96,6 +97,7 @@ def transcribe_chunks(chunk_files: List[str], output_format: str,
         chunk_files: List of chunk file paths
         output_format: Output format (txt, srt, vtt, json)
         prompt_enhancement: Optional additional instructions
+        summary: Optional TranscriptionSummary object for tracking
         
     Returns:
         List of tuples (chunk_index, transcription_text)
@@ -125,11 +127,37 @@ def transcribe_chunks(chunk_files: List[str], output_format: str,
             print(f"    ✓ Chunk {idx} transcribed successfully")
             logger.info(f"Chunk {idx}/{total_chunks} completed")
             
-        except Exception as e:
-            logger.error(f"Failed to transcribe chunk {idx}: {e}")
-            print(f"    ✗ Error transcribing chunk {idx}: {e}")
+            # Track success in summary
+            if summary:
+                summary.record_chunk_success(idx - 1)
+            
+        except GeminiAPIError as e:
+            # Specific API error handling
+            error_msg = f"API Error ({e.error_type}): {str(e)}"
+            logger.error(f"Failed to transcribe chunk {idx}: {error_msg}")
+            print(f"    ✗ {error_msg}")
+            
+            # Track in summary
+            if summary:
+                summary.record_chunk_failure(idx - 1, error_msg)
+                # If this is a content block on first chunk, note it specially
+                if e.error_type == "CONTENT_BLOCKED" and idx == 1:
+                    summary.set_api_error(e.error_type, str(e))
+            
             # Continue with other chunks even if one fails
-            results.append((idx - 1, f"[ERROR: Chunk {idx} transcription failed: {e}]"))
+            results.append((idx - 1, f"[ERROR: Chunk {idx} - {error_msg}]"))
+            
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Failed to transcribe chunk {idx}: {error_msg}")
+            print(f"    ✗ Error transcribing chunk {idx}: {error_msg}")
+            
+            # Track in summary
+            if summary:
+                summary.record_chunk_failure(idx - 1, error_msg)
+            
+            # Continue with other chunks even if one fails
+            results.append((idx - 1, f"[ERROR: Chunk {idx} transcription failed: {error_msg}]"))
     
     return results
 
@@ -392,7 +420,8 @@ def cleanup_chunks(temp_dir: str) -> None:
 
 def process_large_file_chunked(file_path: str, output_format: str = "txt",
                                chunk_duration_minutes: int = CHUNK_DURATION_MINUTES,
-                               prompt_enhancement: Optional[str] = None) -> str:
+                               prompt_enhancement: Optional[str] = None,
+                               summary=None) -> str:
     """
     Process a large file by splitting into chunks, transcribing, and merging.
     
@@ -401,6 +430,7 @@ def process_large_file_chunked(file_path: str, output_format: str = "txt",
         output_format: Output format (txt, srt, vtt, json)
         chunk_duration_minutes: Duration of each chunk in minutes
         prompt_enhancement: Optional additional instructions
+        summary: Optional TranscriptionSummary object for tracking
         
     Returns:
         Complete merged transcription
@@ -418,12 +448,16 @@ def process_large_file_chunked(file_path: str, output_format: str = "txt",
         chunk_files, temp_dir = split_video_into_chunks(file_path, chunk_duration_minutes)
         print(f"✓ Video split into {len(chunk_files)} chunks\n")
         
+        # Update summary with chunk count
+        if summary:
+            summary.chunk_count = len(chunk_files)
+        
         # Step 2: Transcribe each chunk
         print(f"{'='*60}")
         print(f"TRANSCRIBING CHUNKS")
         print(f"{'='*60}")
         
-        chunk_transcriptions = transcribe_chunks(chunk_files, output_format, prompt_enhancement)
+        chunk_transcriptions = transcribe_chunks(chunk_files, output_format, prompt_enhancement, summary)
         
         # Step 3: Merge results
         print(f"\n{'='*60}")
