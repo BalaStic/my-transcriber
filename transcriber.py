@@ -9,8 +9,10 @@ from typing import Optional, Tuple
 
 from config import (
     GEMINI_API_BASE_URL, GEMINI_API_KEY, GEMINI_TEMPERATURE,
-    AUDIO_EXTENSIONS, FFMPEG_SAMPLE_RATE, FFMPEG_CHANNELS, 
-    FFMPEG_BITRATE, FFMPEG_FORMAT, FFMPEG_TIMEOUT, FFPROBE_TIMEOUT
+    AUDIO_EXTENSIONS, GEMINI_AUDIO_MIME_TYPES, AUDIO_CODEC_TO_EXT,
+    FFMPEG_SAMPLE_RATE, FFMPEG_CHANNELS, 
+    FFMPEG_BITRATE, FFMPEG_FORMAT, FFMPEG_TIMEOUT, FFPROBE_TIMEOUT,
+    MAX_FILE_SIZE_MB
 )
 from logger import setup_logger
 
@@ -135,6 +137,118 @@ def is_audio_file(file_path: str) -> bool:
     return ext in AUDIO_EXTENSIONS
 
 
+def probe_audio_codec(file_path: str) -> Optional[str]:
+    """
+    Probe a media file (video or audio) to determine its first audio codec using ffprobe.
+    
+    Args:
+        file_path: Path to the media file
+        
+    Returns:
+        Audio codec name (e.g. 'aac', 'mp3', 'opus'), or None if not found
+    """
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-select_streams", "a:0",
+        "-show_entries", "stream=codec_name",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        file_path
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+            timeout=FFPROBE_TIMEOUT
+        )
+        codec = result.stdout.strip().lower()
+        return codec if codec else None
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+        logger.warning(f"Failed to probe audio codec for {file_path}: {e}")
+        return None
+
+
+def _get_mime_type_for_file(file_path: str) -> Tuple[str, str]:
+    """
+    Determine the appropriate MIME type for a media file.
+    
+    Args:
+        file_path: Path to the audio or video file
+        
+    Returns:
+        Tuple of (mime_type, extension_with_dot)
+        Falls back to ('audio/mp3', '.mp3') if the extension is not in Gemini's supported list
+    """
+    _, ext = os.path.splitext(file_path.lower())
+    mime_type = GEMINI_AUDIO_MIME_TYPES.get(ext)
+    if mime_type:
+        return mime_type, ext
+    else:
+        logger.warning(f"Unsupported extension '{ext}' for Gemini, will re-encode to MP3")
+        return "audio/mp3", ".mp3"
+
+
+def _get_output_ext_for_codec(codec: str) -> str:
+    """
+    Get the appropriate output file extension for an audio codec when demuxing.
+    
+    Args:
+        codec: Audio codec name from ffprobe (e.g. 'aac', 'mp3')
+        
+    Returns:
+        File extension including dot (e.g. '.m4a', '.mp3')
+        Falls back to '.mp3' for unknown codecs
+    """
+    return AUDIO_CODEC_TO_EXT.get(codec, ".mp3")
+
+
+def demux_audio(video_path: str, output_path: str, codec: str) -> str:
+    """
+    Demux (stream copy) the audio track from a video file without re-encoding.
+    This is near-instant (IO-bound) compared to full re-encoding (CPU-bound).
+    
+    Args:
+        video_path: Path to the input video file
+        output_path: Path for the output audio file
+        codec: Audio codec name
+        
+    Returns:
+        Path to the demuxed audio file
+        
+    Raises:
+        subprocess.CalledProcessError: If ffmpeg demuxing fails
+    """
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", video_path,
+        "-vn",
+        "-acodec", "copy",
+        output_path
+    ]
+    logger.info(f"Demuxing {codec} audio stream from {video_path} (no re-encoding)...")
+    try:
+        subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            timeout=FFMPEG_TIMEOUT
+        )
+        logger.info(f"Audio demuxed successfully to {output_path}")
+        return output_path
+    except subprocess.TimeoutExpired:
+        logger.error(f"FFmpeg timeout while demuxing audio from {video_path}")
+        raise
+    except subprocess.CalledProcessError as e:
+        error_msg = e.stderr.decode('utf-8', errors='replace') if e.stderr else "Unknown error"
+        logger.warning(f"FFmpeg demuxing failed ({error_msg}), falling back to re-encode")
+        raise
+
+
 def _parse_api_error(response) -> Tuple[str, str]:
     """
     Parse API error response to extract error type and message.
@@ -211,6 +325,27 @@ def _check_response_for_errors(response_json: dict) -> Tuple[Optional[str], Opti
     return None, None
 
 
+def _get_silence_response(output_format: str) -> str:
+    """
+    Return a format-appropriate 'silence' placeholder string.
+    Used when the Gemini API returns an empty content object with no parts.
+
+    Args:
+        output_format: One of 'txt', 'srt', 'vtt', 'json'
+
+    Returns:
+        A valid, format-correct silence string
+    """
+    if output_format == "srt":
+        return "1\n00:00:00,000 --> 00:00:01,000\n[Silence]\n"
+    elif output_format == "vtt":
+        return "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n[Silence]\n"
+    elif output_format == "json":
+        return '[{"start": 0, "end": 0, "text": "[Silence]"}]'
+    else:  # txt and any unknown formats
+        return "[Silence]"
+
+
 def _get_blocking_reason_message(finish_reason: str, candidate: dict) -> str:
     """
     Get a detailed message explaining why content was blocked.
@@ -245,7 +380,8 @@ def _get_blocking_reason_message(finish_reason: str, candidate: dict) -> str:
     return base_message
 
 def query_gemini_transcription(audio_path: str, output_format: str = "txt", 
-                               prompt_enhancement: Optional[str] = None) -> str:
+                               prompt_enhancement: Optional[str] = None,
+                               mime_type: str = "audio/mp3") -> str:
     """
     Encodes audio to base64 and calls the Gemini API to transcribe.
     
@@ -253,6 +389,7 @@ def query_gemini_transcription(audio_path: str, output_format: str = "txt",
         audio_path: Path to the audio file to transcribe
         output_format: Output format (txt, srt, vtt, json)
         prompt_enhancement: Optional additional instructions for the transcription
+        mime_type: MIME type for the audio file (default: audio/mp3)
         
     Returns:
         The transcribed text in the requested format
@@ -321,7 +458,7 @@ def query_gemini_transcription(audio_path: str, output_format: str = "txt",
             "parts": [
                 {
                     "inline_data": {
-                        "mime_type": "audio/mp3",
+                        "mime_type": mime_type,
                         "data": audio_base64
                     }
                 },
@@ -383,6 +520,13 @@ def query_gemini_transcription(audio_path: str, output_format: str = "txt",
             error_msg = _get_blocking_reason_message(finish_reason, candidate)
             logger.error(f"Content blocked by API: {finish_reason}")
             raise GeminiAPIError(error_msg, error_type="CONTENT_BLOCKED", response_data=response_json)
+        elif finish_reason == "MAX_TOKENS":
+            raise GeminiAPIError(
+                "Gemini response was cut off because the audio is too long for a single request (MAX_TOKENS). "
+                "Try running with --enable-chunking to split the file into smaller segments.",
+                error_type="MAX_TOKENS",
+                response_data=response_json
+            )
     
     if "content" not in candidate:
         # Check if there's a safety rating or other reason for no content
@@ -398,24 +542,57 @@ def query_gemini_transcription(audio_path: str, output_format: str = "txt",
     
     content = candidate["content"]
     if "parts" not in content:
-        raise GeminiAPIError(
-            f"No 'parts' in content: {content}", 
-            error_type="INVALID_RESPONSE",
-            response_data=response_json
-        )
+        # content is {} — the model returned an empty response body.
+        # Inspect finishReason to give a meaningful reaction.
+        finish_reason = candidate.get("finishReason", "UNKNOWN")
+        if finish_reason == "MAX_TOKENS":
+            raise GeminiAPIError(
+                "Gemini response was cut off because the audio is too long for a single request (MAX_TOKENS). "
+                "Try running with --enable-chunking to split the file into smaller segments.",
+                error_type="MAX_TOKENS",
+                response_data=response_json
+            )
+        elif finish_reason in ("STOP", "OTHER", "UNKNOWN", "MALFORMED_RESPONSE"):
+            # Model returned empty content — this is a transcription failure, not genuine silence.
+            # Raise an error so no output file is written.
+            logger.error(
+                f"Gemini returned empty content with no text (finishReason: {finish_reason}). "
+                "Transcription failed."
+            )
+            raise GeminiAPIError(
+                f"Gemini returned no transcription content (finishReason: {finish_reason}). "
+                "The audio may be too long or in an unsupported format. "
+                "Try again with --enable-chunking.",
+                error_type="EMPTY_RESPONSE",
+                response_data=response_json
+            )
+        else:
+            raise GeminiAPIError(
+                f"No 'parts' in content (finishReason: {finish_reason}): {content}",
+                error_type="INVALID_RESPONSE",
+                response_data=response_json
+            )
     
     parts = content["parts"]
     if not parts or len(parts) == 0:
         raise GeminiAPIError("No parts in content", error_type="INVALID_RESPONSE")
     
-    if "text" not in parts[0]:
+    # Collect text from ALL parts — Gemini can split long responses across multiple parts
+    transcript_parts = []
+    for i, part in enumerate(parts):
+        if "text" not in part:
+            logger.warning(f"Part {i} has no 'text' field: {part}")
+            continue
+        transcript_parts.append(part["text"].strip())
+    
+    if not transcript_parts:
         raise GeminiAPIError(
-            f"No 'text' in first part: {parts[0]}", 
+            "No text found in any part of the response",
             error_type="INVALID_RESPONSE",
             response_data=response_json
         )
     
-    transcript = parts[0]["text"].strip()
+    transcript = "".join(transcript_parts)
     
     # Strip markdown code blocks if present (for JSON format)
     if output_format == "json" and transcript.startswith("```"):
@@ -429,12 +606,49 @@ def query_gemini_transcription(audio_path: str, output_format: str = "txt",
     logger.info("Transcription completed successfully")
     return transcript
 
+def _should_use_direct_send(file_path: str) -> Tuple[bool, Optional[str], Optional[str]]:
+    """
+    Determine if a file can be sent directly to Gemini without re-encoding.
+    
+    Decision logic:
+    1. Check if the file extension maps to a Gemini-supported MIME type
+    2. Check if the file size is within reasonable limits (avoid sending huge lossless files)
+    3. For very large lossless files (WAV, FLAC), prefer re-encoding to reduce payload
+    
+    Args:
+        file_path: Path to the audio file
+        
+    Returns:
+        Tuple of (can_send_directly, mime_type, reason_for_rejection)
+    """
+    mime_type, ext = _get_mime_type_for_file(file_path)
+    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+    
+    # High-bitrate lossless formats may produce massive base64 payloads
+    # Re-encode them if they're large to avoid API timeouts/memory issues
+    LARGE_LOSSLESS_THRESHOLD_MB = 50
+    
+    lossless_formats = {'.wav', '.flac'}
+    if ext in lossless_formats and file_size_mb > LARGE_LOSSLESS_THRESHOLD_MB:
+        return False, None, f"Large lossless file ({file_size_mb:.1f}MB), re-encoding to conserve bandwidth"
+    
+    # If the MIME type is supported, send directly
+    if mime_type != "audio/mp3" or ext == ".mp3":
+        return True, mime_type, None
+    
+    # Extension not in Gemini's supported map (e.g. .wma)
+    return False, None, f"Unsupported format '{ext}' for Gemini direct send"
+
+
 def transcribe_file(file_path: str, output_format: str = "txt", 
                     prompt_enhancement: Optional[str] = None) -> str:
     """
     High-level function to transcribe a video or audio file.
-    If the input is a video, extracts the audio first.
-    If the input is an audio file, uses it directly.
+    
+    Strategy (in order of preference):
+    1. Audio files with Gemini-supported format → send directly (no ffmpeg)
+    2. Video files with Gemini-supported audio codec → demux with -acodec copy (near-instant)
+    3. Anything else → fall back to re-encoding to MP3 16kHz mono 32kbps
     
     Args:
         file_path: Path to the input video or audio file
@@ -454,38 +668,89 @@ def transcribe_file(file_path: str, output_format: str = "txt",
         
     is_audio = is_audio_file(file_path)
     temp_audio_file = None
-    temp_file_obj = None
+    active_audio_path = file_path  # Default: use original file
+    mime_type = "audio/mp3"
     
     try:
-        # SECURITY FIX: Use NamedTemporaryFile instead of mktemp()
-        temp_file_obj = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-        temp_audio_file = temp_file_obj.name
-        temp_file_obj.close()
-        
         if is_audio:
-            # For audio files, we compress/re-encode to mp3 32k for efficient payload size
-            logger.info(f"Compressing audio file {file_path}...")
-            cmd = [
-                "ffmpeg", "-y", "-i", file_path,
-                "-ar", FFMPEG_SAMPLE_RATE, 
-                "-ac", FFMPEG_CHANNELS, 
-                "-ab", FFMPEG_BITRATE, 
-                "-f", FFMPEG_FORMAT,
-                temp_audio_file
-            ]
-            subprocess.run(
-                cmd, 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.PIPE, 
-                check=True,
-                timeout=FFMPEG_TIMEOUT
-            )
-            active_audio_path = temp_audio_file
-        else:
-            # For video files, extract the audio
-            active_audio_path = extract_audio(file_path, temp_audio_file)
+            # ---- AUDIO FILE PATH ----
+            can_direct, detected_mime, reason = _should_use_direct_send(file_path)
             
-        transcript = query_gemini_transcription(active_audio_path, output_format, prompt_enhancement)
+            if can_direct:
+                logger.info(f"Sending audio file directly to Gemini ({detected_mime}) — skipping ffmpeg")
+                active_audio_path = file_path
+                mime_type = detected_mime
+            else:
+                # Re-encode to compact MP3
+                logger.info(f"Re-encoding audio to MP3 ({reason if reason else 'unsupported format'})...")
+                temp_file_obj = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+                temp_audio_file = temp_file_obj.name
+                temp_file_obj.close()
+                
+                cmd = [
+                    "ffmpeg", "-y", "-i", file_path,
+                    "-ar", FFMPEG_SAMPLE_RATE,
+                    "-ac", FFMPEG_CHANNELS,
+                    "-ab", FFMPEG_BITRATE,
+                    "-f", FFMPEG_FORMAT,
+                    temp_audio_file
+                ]
+                subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=True,
+                    timeout=FFMPEG_TIMEOUT
+                )
+                active_audio_path = temp_audio_file
+                mime_type = "audio/mp3"
+        else:
+            # ---- VIDEO FILE PATH ----
+            # Probe the actual audio codec inside the video
+            codec = probe_audio_codec(file_path)
+            
+            if codec and codec in AUDIO_CODEC_TO_EXT:
+                # Try demuxing (stream copy) — near-instant
+                output_ext = _get_output_ext_for_codec(codec)
+                temp_file_obj = tempfile.NamedTemporaryFile(suffix=output_ext, delete=False)
+                temp_audio_file = temp_file_obj.name
+                temp_file_obj.close()
+                
+                try:
+                    active_audio_path = demux_audio(file_path, temp_audio_file, codec)
+                    
+                    # Determine MIME type from the output extension
+                    mime_type = GEMINI_AUDIO_MIME_TYPES.get(output_ext, "audio/mp3")
+                    logger.info(f"Demuxed {codec} audio, using MIME type {mime_type}")
+                except subprocess.CalledProcessError:
+                    # Demuxing failed (e.g. codec incompatible with container)
+                    # Clean up the failed temp file and fall back to re-encoding
+                    if temp_audio_file:
+                        try:
+                            os.remove(temp_audio_file)
+                        except OSError:
+                            pass
+                    temp_audio_file = None
+                    logger.info(f"Demuxing failed for {codec}, falling back to MP3 re-encode")
+                    
+                    # Fallback: re-encode to MP3
+                    temp_file_obj = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+                    temp_audio_file = temp_file_obj.name
+                    temp_file_obj.close()
+                    active_audio_path = extract_audio(file_path, temp_audio_file)
+                    mime_type = "audio/mp3"
+            else:
+                # Unknown codec or probing failed — re-encode to MP3
+                logger.info(f"No supported audio codec found, re-encoding to MP3")
+                temp_file_obj = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+                temp_audio_file = temp_file_obj.name
+                temp_file_obj.close()
+                active_audio_path = extract_audio(file_path, temp_audio_file)
+                mime_type = "audio/mp3"
+        
+        transcript = query_gemini_transcription(
+            active_audio_path, output_format, prompt_enhancement, mime_type
+        )
         return transcript
         
     except subprocess.TimeoutExpired:
@@ -496,13 +761,12 @@ def transcribe_file(file_path: str, output_format: str = "txt",
         logger.error(f"FFmpeg processing failed: {error_msg}")
         raise
     finally:
-        # IMPROVED CLEANUP: Remove race condition
-        if temp_audio_file:
+        # Cleanup: only delete temp files (not original input files)
+        if temp_audio_file and temp_audio_file != file_path:
             try:
                 os.remove(temp_audio_file)
                 logger.debug(f"Cleaned up temporary file: {temp_audio_file}")
             except FileNotFoundError:
-                # File already deleted, that's fine
                 pass
             except Exception as e:
                 logger.warning(f"Failed to delete temp file {temp_audio_file}: {e}")

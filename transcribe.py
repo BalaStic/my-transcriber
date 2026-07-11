@@ -7,7 +7,7 @@ from chunk_processor import process_large_file_chunked
 from summary import TranscriptionSummary
 from config import (
     SUPPORTED_OUTPUT_FORMATS, ENABLE_CHUNKING, 
-    CHUNK_DURATION_MINUTES, CHUNK_THRESHOLD_MB
+    CHUNK_DURATION_MINUTES, CHUNK_THRESHOLD_MB, CHUNK_THRESHOLD_MINUTES
 )
 from logger import setup_logger
 
@@ -21,7 +21,6 @@ def main():
     
     parser.add_argument(
         "-i", "--input",
-        required=True,
         help="Path to the input video or audio file to transcribe."
     )
     
@@ -34,8 +33,7 @@ def main():
     parser.add_argument(
         "-f", "--format",
         choices=["txt", "srt", "vtt", "json"],
-        default="txt",
-        help="Output format. Options: txt, srt, vtt, json (default: txt)"
+        help="Output format. Options: txt, srt, vtt, json"
     )
     
     parser.add_argument(
@@ -73,7 +71,19 @@ def main():
         help=f"File size threshold in MB for auto-chunking (default: {CHUNK_THRESHOLD_MB})"
     )
     
-    args = parser.parse_args()
+    if '-h' in sys.argv or '--help' in sys.argv:
+        parser.print_help()
+        sys.exit(0)
+    
+    args, _ = parser.parse_known_args()
+    
+    if not args.input:
+        print("You forgot the input. (-i is mandatory)", file=sys.stderr)
+        sys.exit(1)
+    
+    if not args.format:
+        print("You forgot the format. (-f is mandatory)", file=sys.stderr)
+        sys.exit(1)
     
     # Check if API key is set before proceeding
     from config import GEMINI_API_KEY
@@ -127,13 +137,21 @@ def main():
     elif args.enable_chunking:
         use_chunking = True
         logger.info("Chunking forced enabled by user")
-    elif ENABLE_CHUNKING and file_size_mb > args.chunk_threshold:
+    elif ENABLE_CHUNKING and (
+        file_size_mb > args.chunk_threshold or
+        (duration is not None and duration / 60 > CHUNK_THRESHOLD_MINUTES)
+    ):
         use_chunking = True
-        logger.info(f"Auto-enabling chunking (file size {file_size_mb:.2f}MB > threshold {args.chunk_threshold}MB)")
-        print(f"\n⚠️  Large file detected ({file_size_mb:.2f}MB)")
+        duration_mins = duration / 60 if duration is not None else 0
+        if file_size_mb > args.chunk_threshold:
+            trigger_reason = f"large file ({file_size_mb:.2f}MB > {args.chunk_threshold}MB threshold)"
+        else:
+            trigger_reason = f"long duration ({duration_mins:.1f}min > {CHUNK_THRESHOLD_MINUTES}min threshold)"
+        logger.info(f"Auto-enabling chunking: {trigger_reason}")
+        print(f"\n⚠️  Auto-chunking triggered: {trigger_reason}")
         print(f"⚠️  Enabling chunked processing mode")
         print(f"⚠️  Chunk duration: {args.chunk_duration} minutes\n")
-        summary.add_warning(f"Large file ({file_size_mb:.2f}MB) - using chunked processing")
+        summary.add_warning(f"Auto-chunking enabled: {trigger_reason}")
     
     # Update summary with chunking info
     summary.chunked_processing = use_chunking

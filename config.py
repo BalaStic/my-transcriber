@@ -5,7 +5,7 @@ Centralizes all configuration values and environment variables.
 import os
 
 # API Configuration
-GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 # File Upload Configuration
@@ -22,6 +22,35 @@ ALLOWED_EXTENSIONS = {
 
 # Audio file extensions (for format detection)
 AUDIO_EXTENSIONS = {'.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.wma', '.opus'}
+
+# Gemini-supported audio MIME types by file extension
+# Extensions not in this map will be re-encoded to MP3 before sending
+GEMINI_AUDIO_MIME_TYPES = {
+    '.mp3':  'audio/mpeg',
+    '.wav':  'audio/wav',
+    '.m4a':  'audio/mp4',
+    '.aac':  'audio/aac',
+    '.flac': 'audio/flac',
+    '.ogg':  'audio/ogg',
+    '.opus': 'audio/ogg',   # Gemini treats opus as audio/ogg
+    '.webm': 'audio/webm',
+}
+
+# Audio codec names (from ffprobe) to output file extension for demuxing
+# Used when extracting audio from video with -acodec copy
+AUDIO_CODEC_TO_EXT = {
+    'aac':       '.m4a',
+    'mp3':       '.mp3',
+    'mp2':       '.mp3',
+    'opus':      '.opus',
+    'vorbis':    '.ogg',
+    'flac':      '.flac',
+    'pcm_s16le': '.wav',
+    'pcm_s24le': '.wav',
+    'pcm_s32le': '.wav',
+    'pcm_f32le': '.wav',
+    'pcm_u8':    '.wav',
+}
 
 # Output formats
 SUPPORTED_OUTPUT_FORMATS = ['txt', 'srt', 'vtt', 'json']
@@ -53,5 +82,6 @@ LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # Chunking Configuration (for large files)
 ENABLE_CHUNKING = True  # Enable automatic chunking for large files
-CHUNK_DURATION_MINUTES = 10  # Duration of each chunk in minutes
+CHUNK_DURATION_MINUTES = 15  # Duration of each chunk in minutes
 CHUNK_THRESHOLD_MB = 100  # Auto-enable chunking for files larger than this (in MB)
+CHUNK_THRESHOLD_MINUTES = 15  # Auto-enable chunking for files longer than this (in minutes)
