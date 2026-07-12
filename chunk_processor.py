@@ -89,7 +89,9 @@ def split_video_into_chunks(video_path: str, chunk_duration_minutes: int) -> Tup
 
 def transcribe_chunks(chunk_files: List[str], output_format: str, 
                       prompt_enhancement: Optional[str] = None,
-                      summary=None) -> List[Tuple[int, str]]:
+                      summary=None,
+                      debug_audio_paths: Optional[List[str]] = None,
+                      temp_dir: Optional[str] = None) -> List[Tuple[int, str]]:
     """
     Transcribe each chunk file.
     
@@ -98,6 +100,9 @@ def transcribe_chunks(chunk_files: List[str], output_format: str,
         output_format: Output format (txt, srt, vtt, json)
         prompt_enhancement: Optional additional instructions
         summary: Optional TranscriptionSummary object for tracking
+        debug_audio_paths: Optional list to collect temp audio paths on error (for debugging)
+        temp_dir: Optional directory for temporary audio files created during transcription.
+                  Pass the chunk directory to co-locate temp audio with the video chunks.
         
     Returns:
         List of tuples (chunk_index, transcription_text)
@@ -117,10 +122,14 @@ def transcribe_chunks(chunk_files: List[str], output_format: str,
                 secs = int(duration % 60)
                 print(f"    Duration: {mins:02d}:{secs:02d}")
             
+            # Use an error collector so transcribe_file can preserve its temp audio on failure
+            error_collector = {}
             transcript = transcribe_file(
                 file_path=chunk_file,
                 output_format=output_format,
-                prompt_enhancement=prompt_enhancement
+                prompt_enhancement=prompt_enhancement,
+                _error_collector=error_collector,
+                temp_dir=temp_dir
             )
             
             results.append((idx - 1, transcript))  # 0-indexed
@@ -137,6 +146,10 @@ def transcribe_chunks(chunk_files: List[str], output_format: str,
             logger.error(f"Failed to transcribe chunk {idx}: {error_msg}")
             print(f"    ✗ {error_msg}")
             
+            # Collect preserved temp audio path for debug output
+            if debug_audio_paths is not None and 'temp_audio' in error_collector:
+                debug_audio_paths.append(error_collector['temp_audio'])
+            
             # Track in summary
             if summary:
                 summary.record_chunk_failure(idx - 1, error_msg)
@@ -144,20 +157,24 @@ def transcribe_chunks(chunk_files: List[str], output_format: str,
                 if e.error_type == "CONTENT_BLOCKED" and idx == 1:
                     summary.set_api_error(e.error_type, str(e))
             
-            # Continue with other chunks even if one fails
-            results.append((idx - 1, f"[ERROR: Chunk {idx} - {error_msg}]"))
+            # Stop the entire process — a partial transcription is unusable
+            raise
             
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Failed to transcribe chunk {idx}: {error_msg}")
             print(f"    ✗ Error transcribing chunk {idx}: {error_msg}")
             
+            # Collect preserved temp audio path for debug output
+            if debug_audio_paths is not None and 'temp_audio' in error_collector:
+                debug_audio_paths.append(error_collector['temp_audio'])
+            
             # Track in summary
             if summary:
                 summary.record_chunk_failure(idx - 1, error_msg)
             
-            # Continue with other chunks even if one fails
-            results.append((idx - 1, f"[ERROR: Chunk {idx} transcription failed: {error_msg}]"))
+            # Stop the entire process — a partial transcription is unusable
+            raise
     
     return results
 
@@ -437,6 +454,8 @@ def process_large_file_chunked(file_path: str, output_format: str = "txt",
     """
     chunk_files = []
     temp_dir = None
+    success = False
+    debug_audio_paths: List[str] = []
     
     try:
         # Step 1: Split into chunks
@@ -457,7 +476,10 @@ def process_large_file_chunked(file_path: str, output_format: str = "txt",
         print(f"TRANSCRIBING CHUNKS")
         print(f"{'='*60}")
         
-        chunk_transcriptions = transcribe_chunks(chunk_files, output_format, prompt_enhancement, summary)
+        chunk_transcriptions = transcribe_chunks(
+            chunk_files, output_format, prompt_enhancement, summary, debug_audio_paths,
+            temp_dir=temp_dir
+        )
         
         # Step 3: Merge results
         print(f"\n{'='*60}")
@@ -476,14 +498,34 @@ def process_large_file_chunked(file_path: str, output_format: str = "txt",
             merged = merge_txt_transcriptions(chunk_transcriptions)
         
         print(f"✓ Results merged successfully\n")
-        
+        success = True
         return merged
         
     finally:
-        # Step 4: Cleanup
         if temp_dir:
-            print(f"{'='*60}")
-            print(f"CLEANUP")
-            print(f"{'='*60}")
-            cleanup_chunks(temp_dir)
-            print(f"✓ Temporary chunks removed\n")
+            if success:
+                # Step 4: Cleanup — only on success
+                print(f"{'='*60}")
+                print(f"CLEANUP")
+                print(f"{'='*60}")
+                cleanup_chunks(temp_dir)
+                print(f"✓ Temporary chunks removed\n")
+            else:
+                # On failure: keep chunks so the user can inspect them
+                print(f"\n{'='*60}")
+                print(f"DEBUG: CHUNK FILES PRESERVED (not deleted due to error)")
+                print(f"{'='*60}")
+                print(f"Temp directory: {temp_dir}")
+                existing = [f for f in chunk_files if os.path.exists(f)]
+                if existing:
+                    print(f"Chunk files ({len(existing)}):")
+                    for chunk_path in existing:
+                        print(f"  {chunk_path}")
+                else:
+                    print(f"  (no chunk files found in {temp_dir})")
+                if debug_audio_paths:
+                    print(f"\nTemp audio files ({len(debug_audio_paths)}):")
+                    for audio_path in debug_audio_paths:
+                        print(f"  {audio_path}")
+                print(f"{'='*60}\n")
+                logger.info(f"Chunk files preserved for debugging in: {temp_dir}")

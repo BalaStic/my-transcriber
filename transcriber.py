@@ -5,6 +5,7 @@ import base64
 import tempfile
 import subprocess
 import requests
+from pathlib import Path
 from typing import Optional, Tuple
 
 from config import (
@@ -12,7 +13,7 @@ from config import (
     AUDIO_EXTENSIONS, GEMINI_AUDIO_MIME_TYPES, AUDIO_CODEC_TO_EXT,
     FFMPEG_SAMPLE_RATE, FFMPEG_CHANNELS, 
     FFMPEG_BITRATE, FFMPEG_FORMAT, FFMPEG_TIMEOUT, FFPROBE_TIMEOUT,
-    MAX_FILE_SIZE_MB
+    MAX_FILE_SIZE_MB, MAX_INLINE_AUDIO_MB, GEMINI_MAX_OUTPUT_TOKENS
 )
 from logger import setup_logger
 
@@ -469,6 +470,7 @@ def query_gemini_transcription(audio_path: str, output_format: str = "txt",
         }],
         "generationConfig": {
             "temperature": GEMINI_TEMPERATURE,
+            "maxOutputTokens": GEMINI_MAX_OUTPUT_TOKENS,
         }
     }
     
@@ -522,8 +524,9 @@ def query_gemini_transcription(audio_path: str, output_format: str = "txt",
             raise GeminiAPIError(error_msg, error_type="CONTENT_BLOCKED", response_data=response_json)
         elif finish_reason == "MAX_TOKENS":
             raise GeminiAPIError(
-                "Gemini response was cut off because the audio is too long for a single request (MAX_TOKENS). "
-                "Try running with --enable-chunking to split the file into smaller segments.",
+                "Gemini response was cut off because the audio produces too much output text (MAX_TOKENS). "
+                "If you are already using chunking, reduce CHUNK_DURATION_MINUTES in config.py. "
+                "Otherwise, run with --enable-chunking.",
                 error_type="MAX_TOKENS",
                 response_data=response_json
             )
@@ -547,8 +550,9 @@ def query_gemini_transcription(audio_path: str, output_format: str = "txt",
         finish_reason = candidate.get("finishReason", "UNKNOWN")
         if finish_reason == "MAX_TOKENS":
             raise GeminiAPIError(
-                "Gemini response was cut off because the audio is too long for a single request (MAX_TOKENS). "
-                "Try running with --enable-chunking to split the file into smaller segments.",
+                "Gemini response was cut off because the audio produces too much output text (MAX_TOKENS). "
+                "If you are already using chunking, reduce CHUNK_DURATION_MINUTES in config.py. "
+                "Otherwise, run with --enable-chunking.",
                 error_type="MAX_TOKENS",
                 response_data=response_json
             )
@@ -640,8 +644,39 @@ def _should_use_direct_send(file_path: str) -> Tuple[bool, Optional[str], Option
     return False, None, f"Unsupported format '{ext}' for Gemini direct send"
 
 
+def _make_audio_path(source_path: str, suffix: str, temp_dir: Optional[str] = None) -> str:
+    """
+    Build a path for a temporary audio file.
+
+    When temp_dir is provided (chunked processing), the audio file is named
+    after the source video chunk stem so that matching pairs sit side-by-side:
+        my_video_chunk_001.mp4  →  my_video_chunk_001.mp3
+
+    When temp_dir is None (single-file processing), a random OS temp file is
+    used to avoid collisions.
+
+    Args:
+        source_path: Path to the source media file (used for stem derivation)
+        suffix: File extension including dot (e.g. '.mp3', '.m4a')
+        temp_dir: Directory in which to place the file, or None for system temp
+
+    Returns:
+        Absolute path for the audio file (file is NOT created here)
+    """
+    if temp_dir:
+        stem = Path(source_path).stem
+        return os.path.join(temp_dir, stem + suffix)
+    else:
+        f = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        path = f.name
+        f.close()
+        return path
+
+
 def transcribe_file(file_path: str, output_format: str = "txt", 
-                    prompt_enhancement: Optional[str] = None) -> str:
+                    prompt_enhancement: Optional[str] = None,
+                    _error_collector: Optional[dict] = None,
+                    temp_dir: Optional[str] = None) -> str:
     """
     High-level function to transcribe a video or audio file.
     
@@ -654,6 +689,10 @@ def transcribe_file(file_path: str, output_format: str = "txt",
         file_path: Path to the input video or audio file
         output_format: Output format (txt, srt, vtt, json)
         prompt_enhancement: Optional additional instructions for transcription
+        _error_collector: Optional dict for preserving temp audio path on error (debug)
+        temp_dir: Optional directory for temporary audio files. If None, uses the
+                  system temp dir. Pass the chunk directory to co-locate temp audio
+                  files with the video chunks.
         
     Returns:
         The transcribed text in the requested format
@@ -683,9 +722,7 @@ def transcribe_file(file_path: str, output_format: str = "txt",
             else:
                 # Re-encode to compact MP3
                 logger.info(f"Re-encoding audio to MP3 ({reason if reason else 'unsupported format'})...")
-                temp_file_obj = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-                temp_audio_file = temp_file_obj.name
-                temp_file_obj.close()
+                temp_audio_file = _make_audio_path(file_path, ".mp3", temp_dir)
                 
                 cmd = [
                     "ffmpeg", "-y", "-i", file_path,
@@ -712,9 +749,7 @@ def transcribe_file(file_path: str, output_format: str = "txt",
             if codec and codec in AUDIO_CODEC_TO_EXT:
                 # Try demuxing (stream copy) — near-instant
                 output_ext = _get_output_ext_for_codec(codec)
-                temp_file_obj = tempfile.NamedTemporaryFile(suffix=output_ext, delete=False)
-                temp_audio_file = temp_file_obj.name
-                temp_file_obj.close()
+                temp_audio_file = _make_audio_path(file_path, output_ext, temp_dir)
                 
                 try:
                     active_audio_path = demux_audio(file_path, temp_audio_file, codec)
@@ -722,6 +757,25 @@ def transcribe_file(file_path: str, output_format: str = "txt",
                     # Determine MIME type from the output extension
                     mime_type = GEMINI_AUDIO_MIME_TYPES.get(output_ext, "audio/mp3")
                     logger.info(f"Demuxed {codec} audio, using MIME type {mime_type}")
+                    
+                    # Size guard: large demuxed files cause MALFORMED_RESPONSE from Gemini.
+                    # Re-encode to compact MP3 if the payload would be too big.
+                    demuxed_size_mb = os.path.getsize(active_audio_path) / (1024 * 1024)
+                    if demuxed_size_mb > MAX_INLINE_AUDIO_MB:
+                        logger.info(
+                            f"Demuxed audio is {demuxed_size_mb:.1f} MB "
+                            f"(>{MAX_INLINE_AUDIO_MB} MB limit) — re-encoding to compact MP3 "
+                            "to avoid API MALFORMED_RESPONSE..."
+                        )
+                        # Remove the oversized demuxed file
+                        try:
+                            os.remove(temp_audio_file)
+                        except OSError:
+                            pass
+                        # Create a new temp file for the compact MP3
+                        temp_audio_file = _make_audio_path(file_path, ".mp3", temp_dir)
+                        active_audio_path = extract_audio(file_path, temp_audio_file)
+                        mime_type = "audio/mp3"
                 except subprocess.CalledProcessError:
                     # Demuxing failed (e.g. codec incompatible with container)
                     # Clean up the failed temp file and fall back to re-encoding
@@ -734,23 +788,22 @@ def transcribe_file(file_path: str, output_format: str = "txt",
                     logger.info(f"Demuxing failed for {codec}, falling back to MP3 re-encode")
                     
                     # Fallback: re-encode to MP3
-                    temp_file_obj = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-                    temp_audio_file = temp_file_obj.name
-                    temp_file_obj.close()
+                    temp_audio_file = _make_audio_path(file_path, ".mp3", temp_dir)
                     active_audio_path = extract_audio(file_path, temp_audio_file)
                     mime_type = "audio/mp3"
             else:
                 # Unknown codec or probing failed — re-encode to MP3
                 logger.info(f"No supported audio codec found, re-encoding to MP3")
-                temp_file_obj = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-                temp_audio_file = temp_file_obj.name
-                temp_file_obj.close()
+                temp_audio_file = _make_audio_path(file_path, ".mp3", temp_dir)
                 active_audio_path = extract_audio(file_path, temp_audio_file)
                 mime_type = "audio/mp3"
         
         transcript = query_gemini_transcription(
             active_audio_path, output_format, prompt_enhancement, mime_type
         )
+        # Mark success so finally block knows it can clean up
+        if _error_collector is not None:
+            _error_collector['success'] = True
         return transcript
         
     except subprocess.TimeoutExpired:
@@ -763,10 +816,18 @@ def transcribe_file(file_path: str, output_format: str = "txt",
     finally:
         # Cleanup: only delete temp files (not original input files)
         if temp_audio_file and temp_audio_file != file_path:
-            try:
-                os.remove(temp_audio_file)
-                logger.debug(f"Cleaned up temporary file: {temp_audio_file}")
-            except FileNotFoundError:
-                pass
-            except Exception as e:
-                logger.warning(f"Failed to delete temp file {temp_audio_file}: {e}")
+            success = _error_collector is not None and _error_collector.get('success', False)
+            if success or _error_collector is None:
+                # Normal cleanup
+                try:
+                    os.remove(temp_audio_file)
+                    logger.debug(f"Cleaned up temporary file: {temp_audio_file}")
+                except FileNotFoundError:
+                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to delete temp file {temp_audio_file}: {e}")
+            else:
+                # Error path: preserve the file and record its path for the caller
+                if os.path.exists(temp_audio_file):
+                    _error_collector['temp_audio'] = temp_audio_file
+                    logger.error(f"Temp audio file preserved for debugging: {temp_audio_file}")

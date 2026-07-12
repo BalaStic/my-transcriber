@@ -69,6 +69,7 @@ API_TIMEOUT = 180  # 3 minutes for API calls
 
 # Gemini API Configuration
 GEMINI_TEMPERATURE = 0.1  # Low temperature for deterministic transcription
+GEMINI_MAX_OUTPUT_TOKENS = 65536  # Maximum output tokens (model's documented limit)
 
 # Flask Configuration
 FLASK_HOST = '0.0.0.0'
@@ -82,6 +83,11 @@ LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # Chunking Configuration (for large files)
 ENABLE_CHUNKING = True  # Enable automatic chunking for large files
-CHUNK_DURATION_MINUTES = 15  # Duration of each chunk in minutes
-CHUNK_THRESHOLD_MB = 100  # Auto-enable chunking for files larger than this (in MB)
+CHUNK_DURATION_MINUTES = 15  # Duration of each chunk in minutes 
+CHUNK_THRESHOLD_MB = 999  # Auto-enable chunking for files larger than this (in MB)
 CHUNK_THRESHOLD_MINUTES = 15  # Auto-enable chunking for files longer than this (in minutes)
+
+# Inline audio size limit for Gemini API
+# Demuxed audio files larger than this are re-encoded to compact MP3 before sending,
+# to avoid MALFORMED_RESPONSE errors caused by oversized inline payloads.
+MAX_INLINE_AUDIO_MB = 30
