@@ -106,6 +106,10 @@ def transcribe_chunks(chunk_files: List[str], output_format: str,
         
     Returns:
         List of tuples (chunk_index, transcription_text)
+        
+    Raises:
+        GeminiAPIError: If a chunk fails with an API error (partial results may exist)
+        Exception: If a chunk fails with a non-API error (partial results may exist)
     """
     results = []
     total_chunks = len(chunk_files)
@@ -157,7 +161,8 @@ def transcribe_chunks(chunk_files: List[str], output_format: str,
                 if e.error_type == "CONTENT_BLOCKED" and idx == 1:
                     summary.set_api_error(e.error_type, str(e))
             
-            # Stop the entire process — a partial transcription is unusable
+            # Attach partial results to the exception so the caller can save them
+            e.partial_results = results
             raise
             
         except Exception as e:
@@ -173,7 +178,8 @@ def transcribe_chunks(chunk_files: List[str], output_format: str,
             if summary:
                 summary.record_chunk_failure(idx - 1, error_msg)
             
-            # Stop the entire process — a partial transcription is unusable
+            # Attach partial results to the exception so the caller can save them
+            e.partial_results = results
             raise
     
     return results
@@ -451,11 +457,16 @@ def process_large_file_chunked(file_path: str, output_format: str = "txt",
         
     Returns:
         Complete merged transcription
+        
+    Raises:
+        GeminiAPIError: If a chunk fails with an API error
+        Exception: If a chunk fails with a non-API error
     """
     chunk_files = []
     temp_dir = None
     success = False
     debug_audio_paths: List[str] = []
+    chunk_transcriptions: List[Tuple[int, str]] = []
     
     try:
         # Step 1: Split into chunks
@@ -501,6 +512,17 @@ def process_large_file_chunked(file_path: str, output_format: str = "txt",
         success = True
         return merged
         
+    except (GeminiAPIError, Exception) as e:
+        # Save partial transcription if we have any results
+        partial_results = getattr(e, 'partial_results', chunk_transcriptions)
+        if temp_dir and partial_results:
+            _save_partial_transcription(
+                partial_results, file_path, output_format,
+                chunk_duration_minutes, temp_dir
+            )
+        # Re-raise so the caller handles the error
+        raise
+        
     finally:
         if temp_dir:
             if success:
@@ -529,3 +551,56 @@ def process_large_file_chunked(file_path: str, output_format: str = "txt",
                         print(f"  {audio_path}")
                 print(f"{'='*60}\n")
                 logger.info(f"Chunk files preserved for debugging in: {temp_dir}")
+
+
+def _save_partial_transcription(
+    partial_results: List[Tuple[int, str]],
+    file_path: str,
+    output_format: str,
+    chunk_duration_minutes: int,
+    temp_dir: str
+) -> None:
+    """
+    Save a partial transcription to the chunk temp directory on error.
+    
+    Args:
+        partial_results: List of (chunk_index, transcription_text) tuples
+        file_path: Original input file path (used for base name)
+        output_format: Output format (txt, srt, vtt, json)
+        chunk_duration_minutes: Duration of each chunk for timestamp offset
+        temp_dir: Directory where chunks are stored (partial file saved here too)
+    """
+    if not partial_results:
+        return
+    
+    base_name = Path(file_path).stem
+    partial_path = os.path.join(temp_dir, f"{base_name}_partial.{output_format}")
+    
+    try:
+        # Merge partial results using the same merge functions
+        if output_format == "txt":
+            merged = merge_txt_transcriptions(partial_results)
+        elif output_format == "srt":
+            merged = merge_srt_transcriptions(partial_results, chunk_duration_minutes)
+        elif output_format == "vtt":
+            merged = merge_vtt_transcriptions(partial_results, chunk_duration_minutes)
+        elif output_format == "json":
+            merged = merge_json_transcriptions(partial_results, chunk_duration_minutes)
+        else:
+            merged = merge_txt_transcriptions(partial_results)
+        
+        with open(partial_path, "w", encoding="utf-8") as f:
+            f.write(merged)
+        
+        print(f"\n{'='*60}")
+        print(f"⚠️  PARTIAL TRANSCRIPTION SAVED")
+        print(f"{'='*60}")
+        print(f"  {len(partial_results)} of {len(partial_results) + 1}+ chunks completed")
+        print(f"  Saved to: {partial_path}")
+        print(f"  You can use this file to continue in a next session.")
+        print(f"{'='*60}\n")
+        logger.info(f"Partial transcription saved to: {partial_path}")
+        
+    except Exception as e:
+        logger.error(f"Failed to save partial transcription: {e}")
+        print(f"\n⚠️  Could not save partial transcription: {e}\n")

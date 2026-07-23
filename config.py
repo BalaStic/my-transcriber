@@ -83,9 +83,9 @@ LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # Chunking Configuration (for large files)
 ENABLE_CHUNKING = True  # Enable automatic chunking for large files
-CHUNK_DURATION_MINUTES = 15  # Duration of each chunk in minutes 
+CHUNK_DURATION_MINUTES = 10  # Duration of each chunk in minutes 
 CHUNK_THRESHOLD_MB = 999  # Auto-enable chunking for files larger than this (in MB)
-CHUNK_THRESHOLD_MINUTES = 15  # Auto-enable chunking for files longer than this (in minutes)
+CHUNK_THRESHOLD_MINUTES = 10  # Auto-enable chunking for files longer than this (in minutes)
 
 # Inline audio size limit for Gemini API
 # Demuxed audio files larger than this are re-encoded to compact MP3 before sending,
