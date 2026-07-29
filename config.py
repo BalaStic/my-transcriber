@@ -83,9 +83,14 @@ LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # Chunking Configuration (for large files)
 ENABLE_CHUNKING = True  # Enable automatic chunking for large files
-CHUNK_DURATION_MINUTES = 10  # Duration of each chunk in minutes 
+CHUNK_DURATION_MINUTES = 8  # Duration of each chunk in minutes 
 CHUNK_THRESHOLD_MB = 999  # Auto-enable chunking for files larger than this (in MB)
-CHUNK_THRESHOLD_MINUTES = 10  # Auto-enable chunking for files longer than this (in minutes)
+CHUNK_THRESHOLD_MINUTES = 8  # Auto-enable chunking for files longer than this (in minutes)
+
+# Silence-based chunk splitting configuration
+SILENCE_MIN_DURATION = 1.0    # Minimum silence duration (seconds) to qualify as a cut point
+SILENCE_NOISE_THRESHOLD = -30  # dB level below which audio is considered silence
+SILENCE_SEARCH_WINDOW = 60    # Seconds to search BEFORE each ideal cut point for a silence
 
 # Inline audio size limit for Gemini API
 # Demuxed audio files larger than this are re-encoded to compact MP3 before sending,
