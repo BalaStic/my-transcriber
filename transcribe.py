@@ -139,10 +139,10 @@ def main():
         logger.info("Chunking forced enabled by user")
     elif ENABLE_CHUNKING and (
         file_size_mb > args.chunk_threshold or
-        (duration is not None and duration / 60 > CHUNK_THRESHOLD_MINUTES)
+        (duration is not None and round(duration / 60, 1) > CHUNK_THRESHOLD_MINUTES)
     ):
         use_chunking = True
-        duration_mins = duration / 60 if duration is not None else 0
+        duration_mins = round(duration / 60, 1) if duration is not None else 0
         if file_size_mb > args.chunk_threshold:
             trigger_reason = f"large file ({file_size_mb:.2f}MB > {args.chunk_threshold}MB threshold)"
         else:
