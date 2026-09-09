@@ -2,11 +2,11 @@ import os
 import tempfile
 import shutil
 from flask import Flask, render_template, request, jsonify, send_file, make_response
-from transcriber import transcribe_file, get_media_duration, GeminiAPIError
+from transcriber import transcribe_file, get_media_duration, TranscriptionAPIError
 from summary import TranscriptionSummary
 from config import (
     MAX_CONTENT_LENGTH, ALLOWED_EXTENSIONS, SUPPORTED_OUTPUT_FORMATS,
-    FLASK_HOST, FLASK_PORT, FLASK_DEBUG
+    FLASK_HOST, FLASK_PORT, FLASK_DEBUG, DEFAULT_TRANSCRIPTION_PROVIDER
 )
 from logger import setup_logger
 
@@ -74,6 +74,7 @@ def api_transcribe():
         return jsonify({'error': 'Invalid output format requested.'}), 400
         
     prompt_enhancement = request.form.get('prompt', '').strip()
+    provider = (request.form.get('provider') or DEFAULT_TRANSCRIPTION_PROVIDER).lower()
     
     # SECURITY: Sanitize file extension
     filename = file.filename
@@ -118,7 +119,8 @@ def api_transcribe():
         transcript = transcribe_file(
             file_path=temp_file_path,
             output_format=output_format,
-            prompt_enhancement=prompt_enhancement
+            prompt_enhancement=prompt_enhancement,
+            provider=provider
         )
         
         # Mark success and record output length
@@ -136,9 +138,9 @@ def api_transcribe():
             'summary': summary.to_dict()
         })
         
-    except GeminiAPIError as e:
-        # Specific handling for Gemini API errors
-        logger.error(f"Gemini API error ({e.error_type}): {e}")
+    except TranscriptionAPIError as e:
+        # Specific handling for transcription API errors
+        logger.error(f"Transcription API error ({e.error_type}): {e}")
         
         if summary:
             summary.set_api_error(e.error_type, str(e))

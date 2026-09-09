@@ -1,9 +1,10 @@
-# 🎙️ Gemini Transcriber
+# 🎙️ AI Transcriber
 
-A powerful, fast, and secure audio/video transcription application powered by Google's Gemini 2.5 Flash API and FFmpeg. Features both a modern web interface and a command-line interface for flexible transcription workflows.
+A powerful, fast, and secure audio/video transcription application powered by **ElevenLabs Scribe (Speech-to-Text)** by default, with **Google Gemini** as an optional fallback, plus FFmpeg. Features both a modern web interface and a command-line interface for flexible transcription workflows.
 
 ## ✨ Features
 
+- **Multiple Providers**: ElevenLabs Scribe (default) or Google Gemini (fallback), switchable via `TRANSCRIPTION_PROVIDER` env var or the `--provider` CLI flag
 - **Multi-Format Support**: Transcribe video (MP4, AVI, MKV, MOV, WebM, etc.) and audio files (MP3, WAV, AAC, FLAC, etc.)
 - **Multiple Output Formats**: Generate transcriptions as plain text (TXT), SubRip subtitles (SRT), WebVTT, or structured JSON
 - **Smart Audio Compression**: Automatically extracts and compresses audio to 16kHz mono MP3 for optimal API performance
@@ -25,7 +26,8 @@ A powerful, fast, and secure audio/video transcription application powered by Go
   - Windows: Download from [ffmpeg.org](https://ffmpeg.org/download.html) and add to PATH
   - macOS: `brew install ffmpeg`
   - Linux: `sudo apt-get install ffmpeg` or `sudo yum install ffmpeg`
-- **Gemini API Key**: Get yours from [Google AI Studio](https://makersuite.google.com/app/apikey)
+- **ElevenLabs API Key** (default): Get yours from [ElevenLabs](https://elevenlabs.io/app/settings/api-keys)
+- **Gemini API Key** (optional fallback): Get yours from [Google AI Studio](https://makersuite.google.com/app/apikey)
 
 ### Installation
 
@@ -42,14 +44,21 @@ A powerful, fast, and secure audio/video transcription application powered by Go
 
 3. **Set up your API key**:
    ```bash
+   # ElevenLabs (default provider)
    # On Windows (Command Prompt)
-   set GEMINI_API_KEY=your_api_key_here
+   set ELEVENLABS_API_KEY=your_elevenlabs_api_key
    
    # On Windows (PowerShell)
-   $env:GEMINI_API_KEY="your_api_key_here"
+   $env:ELEVENLABS_API_KEY="your_elevenlabs_api_key"
    
    # On macOS/Linux
-   export GEMINI_API_KEY=your_api_key_here
+   export ELEVENLABS_API_KEY=your_elevenlabs_api_key
+   
+   # Optional: Gemini fallback
+   export GEMINI_API_KEY=your_gemini_api_key
+   
+   # Optional: choose the default provider (elevenlabs | gemini)
+   export TRANSCRIPTION_PROVIDER=elevenlabs
    ```
 
 ## 📖 Usage
@@ -80,7 +89,8 @@ python transcribe.py -i input_video.mp4 -f srt
 - `-i, --input`: Path to input video or audio file (required)
 - `-o, --output`: Path to save transcription (default: same name as input with new extension)
 - `-f, --format`: Output format - txt, srt, vtt, or json (default: txt)
-- `--prompt`: Additional instructions for the transcription
+- `--provider`: Transcription provider - `elevenlabs` (default) or `gemini`
+- `--prompt`: Additional instructions for the transcription (Gemini provider only)
 
 **Examples**:
 
@@ -108,6 +118,9 @@ python transcribe.py -i long_lecture.mp4 -f srt --chunk-duration 15
 
 # Disable chunking (process as single file)
 python transcribe.py -i video.mp4 -f txt --disable-chunking
+
+# Use Gemini instead of the default ElevenLabs provider
+python transcribe.py -i video.mp4 -f srt --provider gemini
 ```
 
 ## 📦 Large File Support (Chunking)
@@ -183,6 +196,8 @@ python transcribe.py -i large_movie.mp4 -f srt
 
 The application can be configured via `config.py`:
 
+- **Provider**: Set `DEFAULT_TRANSCRIPTION_PROVIDER` (`elevenlabs` or `gemini`)
+- **ElevenLabs model**: Set `ELEVENLABS_MODEL_ID` (e.g. `scribe_v2`)
 - **File size limits**: Adjust `MAX_FILE_SIZE_MB`
 - **Supported formats**: Modify `ALLOWED_EXTENSIONS`
 - **FFmpeg settings**: Tune audio compression parameters
@@ -324,7 +339,7 @@ my-transcriber/
 
 ### Core Components
 
-- **transcriber.py**: Handles audio extraction, compression, and Gemini API communication with enhanced error detection
+- **transcriber.py**: Handles audio extraction, compression, and ElevenLabs/Gemini API communication with enhanced error detection
 - **chunk_processor.py**: Splits large files into chunks, transcribes each, and merges results with error tracking
 - **summary.py**: Tracks transcription process details, errors, warnings, and generates comprehensive reports
 - **app.py**: Flask web server with REST API endpoints and summary support
@@ -355,9 +370,9 @@ The application automatically:
 
 ### API Integration
 
-- Uses Gemini 2.5 Flash for fast, accurate transcription
-- Temperature set to 0.1 for deterministic output
-- Custom system instructions for each output format
+- Uses ElevenLabs Scribe (Speech-to-Text) by default; Google Gemini is an optional fallback
+- ElevenLabs returns word-level timestamps, which are grouped into SRT/VTT/JSON segments
+- Gemini uses temperature 0.1 and custom system instructions for each output format
 - Comprehensive error handling and validation
 
 ### Supported Formats
@@ -391,8 +406,8 @@ Logs include timestamps, module names, and full context for troubleshooting.
 - Test with: `ffmpeg -version`
 
 ### "API request failed"
-- Verify your `GEMINI_API_KEY` is set correctly
-- Check your API quota at [Google AI Studio](https://makersuite.google.com/)
+- Verify your `ELEVENLABS_API_KEY` (or `GEMINI_API_KEY`) is set correctly
+- Check your API quota (ElevenLabs: https://elevenlabs.io/pricing; Gemini: Google AI Studio)
 
 ### "Content blocked by safety filters" (CONTENT_BLOCKED)
 **Cause**: The Gemini API detected content that violates its safety policies.
@@ -454,7 +469,8 @@ This project is open source and available under the MIT License.
 
 ## 🙏 Acknowledgments
 
-- **Google Gemini**: For the powerful multimodal AI API
+- **ElevenLabs**: For the Scribe Speech-to-Text API
+- **Google Gemini**: For the powerful multimodal AI API (fallback provider)
 - **FFmpeg**: For exceptional multimedia processing capabilities
 - **Flask**: For the lightweight web framework
 

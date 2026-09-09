@@ -8,6 +8,19 @@ import os
 GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
+# ElevenLabs Speech-to-Text (Scribe) Configuration
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
+ELEVENLABS_STT_URL = os.environ.get(
+    "ELEVENLABS_STT_URL",
+    "https://api.elevenlabs.io/v1/speech-to-text"
+)
+ELEVENLABS_MODEL_ID = os.environ.get("ELEVENLABS_MODEL_ID", "scribe_v2")
+ELEVENLABS_LANGUAGE_CODE = os.environ.get("ELEVENLABS_LANGUAGE_CODE")  # None -> auto-detect
+ELEVENLABS_TIMESTAMPS_GRANULARITY = "word"
+
+# Transcription provider: "elevenlabs" (default) or "gemini"
+DEFAULT_TRANSCRIPTION_PROVIDER = os.environ.get("TRANSCRIPTION_PROVIDER", "elevenlabs")
+
 # File Upload Configuration
 MAX_FILE_SIZE_MB = 100
 MAX_CONTENT_LENGTH = MAX_FILE_SIZE_MB * 1024 * 1024
@@ -83,9 +96,9 @@ LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # Chunking Configuration (for large files)
 ENABLE_CHUNKING = True  # Enable automatic chunking for large files
-CHUNK_DURATION_MINUTES = 8  # Duration of each chunk in minutes 
+CHUNK_DURATION_MINUTES = 15  # Duration of each chunk in minutes 
 CHUNK_THRESHOLD_MB = 999  # Auto-enable chunking for files larger than this (in MB)
-CHUNK_THRESHOLD_MINUTES = 8  # Auto-enable chunking for files longer than this (in minutes)
+CHUNK_THRESHOLD_MINUTES = 15  # Auto-enable chunking for files longer than this (in minutes)
 
 # Silence-based chunk splitting configuration
 SILENCE_MIN_DURATION = 1.0    # Minimum silence duration (seconds) to qualify as a cut point

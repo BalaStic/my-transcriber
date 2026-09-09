@@ -16,7 +16,7 @@ from config import (
     SILENCE_MIN_DURATION, SILENCE_NOISE_THRESHOLD, SILENCE_SEARCH_WINDOW
 )
 from logger import setup_logger
-from transcriber import transcribe_file, get_media_duration, GeminiAPIError
+from transcriber import transcribe_file, get_media_duration, TranscriptionAPIError
 
 logger = setup_logger(__name__)
 
@@ -217,7 +217,8 @@ def transcribe_chunks(chunk_files: List[str], output_format: str,
                       prompt_enhancement: Optional[str] = None,
                       summary=None,
                       debug_audio_paths: Optional[List[str]] = None,
-                      temp_dir: Optional[str] = None) -> List[Tuple[int, str]]:
+                      temp_dir: Optional[str] = None,
+                      provider: Optional[str] = None) -> List[Tuple[int, str]]:
     """
     Transcribe each chunk file.
     
@@ -229,12 +230,13 @@ def transcribe_chunks(chunk_files: List[str], output_format: str,
         debug_audio_paths: Optional list to collect temp audio paths on error (for debugging)
         temp_dir: Optional directory for temporary audio files created during transcription.
                   Pass the chunk directory to co-locate temp audio with the video chunks.
+        provider: Optional transcription provider override ("elevenlabs" or "gemini").
         
     Returns:
         List of tuples (chunk_index, transcription_text)
         
     Raises:
-        GeminiAPIError: If a chunk fails with an API error (partial results may exist)
+        TranscriptionAPIError: If a chunk fails with an API error (partial results may exist)
         Exception: If a chunk fails with a non-API error (partial results may exist)
     """
     results = []
@@ -259,7 +261,8 @@ def transcribe_chunks(chunk_files: List[str], output_format: str,
                 output_format=output_format,
                 prompt_enhancement=prompt_enhancement,
                 _error_collector=error_collector,
-                temp_dir=temp_dir
+                temp_dir=temp_dir,
+                provider=provider
             )
             
             results.append((idx, transcript))  # 1-indexed
@@ -270,7 +273,7 @@ def transcribe_chunks(chunk_files: List[str], output_format: str,
             if summary:
                 summary.record_chunk_success(idx)
             
-        except GeminiAPIError as e:
+        except TranscriptionAPIError as e:
             # Specific API error handling
             error_msg = f"API Error ({e.error_type}): {str(e)}"
             logger.error(f"Failed to transcribe chunk {idx}: {error_msg}")
@@ -570,7 +573,8 @@ def cleanup_chunks(temp_dir: str) -> None:
 def process_large_file_chunked(file_path: str, output_format: str = "txt",
                                chunk_duration_minutes: int = CHUNK_DURATION_MINUTES,
                                prompt_enhancement: Optional[str] = None,
-                               summary=None) -> str:
+                               summary=None,
+                               provider: Optional[str] = None) -> str:
     """
     Process a large file by splitting into chunks, transcribing, and merging.
     
@@ -580,12 +584,13 @@ def process_large_file_chunked(file_path: str, output_format: str = "txt",
         chunk_duration_minutes: Duration of each chunk in minutes
         prompt_enhancement: Optional additional instructions
         summary: Optional TranscriptionSummary object for tracking
+        provider: Optional transcription provider override ("elevenlabs" or "gemini").
         
     Returns:
         Complete merged transcription
         
     Raises:
-        GeminiAPIError: If a chunk fails with an API error
+        TranscriptionAPIError: If a chunk fails with an API error
         Exception: If a chunk fails with a non-API error
     """
     chunk_files = []
@@ -616,7 +621,7 @@ def process_large_file_chunked(file_path: str, output_format: str = "txt",
 
         chunk_transcriptions = transcribe_chunks(
             chunk_files, output_format, prompt_enhancement, summary, debug_audio_paths,
-            temp_dir=temp_dir
+            temp_dir=temp_dir, provider=provider
         )
 
         # Step 3: Merge results
@@ -639,7 +644,7 @@ def process_large_file_chunked(file_path: str, output_format: str = "txt",
         success = True
         return merged
 
-    except (GeminiAPIError, Exception) as e:
+    except Exception as e:
         # Save partial transcription if we have any results
         partial_results = getattr(e, 'partial_results', chunk_transcriptions)
         if temp_dir and partial_results:

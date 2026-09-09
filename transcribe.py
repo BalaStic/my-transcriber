@@ -2,12 +2,13 @@
 import os
 import sys
 import argparse
-from transcriber import transcribe_file, get_media_duration, GeminiAPIError
+from transcriber import transcribe_file, get_media_duration, TranscriptionAPIError
 from chunk_processor import process_large_file_chunked
 from summary import TranscriptionSummary
 from config import (
     SUPPORTED_OUTPUT_FORMATS, ENABLE_CHUNKING, 
-    CHUNK_DURATION_MINUTES, CHUNK_THRESHOLD_MB, CHUNK_THRESHOLD_MINUTES
+    CHUNK_DURATION_MINUTES, CHUNK_THRESHOLD_MB, CHUNK_THRESHOLD_MINUTES,
+    DEFAULT_TRANSCRIPTION_PROVIDER
 )
 from logger import setup_logger
 
@@ -71,6 +72,13 @@ def main():
         help=f"File size threshold in MB for auto-chunking (default: {CHUNK_THRESHOLD_MB})"
     )
     
+    parser.add_argument(
+        "--provider",
+        choices=["elevenlabs", "gemini"],
+        default=DEFAULT_TRANSCRIPTION_PROVIDER,
+        help=f"Transcription provider to use (default: {DEFAULT_TRANSCRIPTION_PROVIDER})"
+    )
+    
     if '-h' in sys.argv or '--help' in sys.argv:
         parser.print_help()
         sys.exit(0)
@@ -86,9 +94,13 @@ def main():
         sys.exit(1)
     
     # Check if API key is set before proceeding
-    from config import GEMINI_API_KEY
-    if not GEMINI_API_KEY:
-        print("you forgot to set the API key", file=sys.stderr)
+    provider = args.provider.lower()
+    from config import ELEVENLABS_API_KEY, GEMINI_API_KEY
+    if provider == "elevenlabs" and not ELEVENLABS_API_KEY:
+        print("you forgot to set the ELEVENLABS_API_KEY", file=sys.stderr)
+        sys.exit(1)
+    if provider == "gemini" and not GEMINI_API_KEY:
+        print("you forgot to set the GEMINI_API_KEY", file=sys.stderr)
         sys.exit(1)
     
     input_path = args.input
@@ -106,6 +118,7 @@ def main():
     print(f"=== Video Transcriber ===")
     print(f"Input file: {input_path}")
     print(f"Target format: {args.format.upper()}")
+    print(f"Provider: {provider}")
     logger.info(f"Starting transcription: {input_path} -> {args.format}")
     
     # Check file size to determine if chunking is needed
@@ -166,14 +179,16 @@ def main():
                 output_format=args.format,
                 chunk_duration_minutes=args.chunk_duration,
                 prompt_enhancement=args.prompt,
-                summary=summary  # Pass summary for tracking
+                summary=summary,  # Pass summary for tracking
+                provider=provider
             )
         else:
             # Process as single file
             transcript = transcribe_file(
                 file_path=input_path,
                 output_format=args.format,
-                prompt_enhancement=args.prompt
+                prompt_enhancement=args.prompt,
+                provider=provider
             )
         
         # Record successful completion
@@ -205,11 +220,11 @@ def main():
         # Display comprehensive summary
         summary.print_summary()
     
-    except GeminiAPIError as e:
-        # Specific handling for Gemini API errors
+    except TranscriptionAPIError as e:
+        # Specific handling for transcription API errors
         summary.set_api_error(e.error_type, str(e))
         summary.mark_complete(success=False)
-        logger.error(f"Gemini API error ({e.error_type}): {e}")
+        logger.error(f"Transcription API error ({e.error_type}): {e}")
         
         # Print summary with error details
         summary.print_summary()

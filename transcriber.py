@@ -6,26 +6,30 @@ import tempfile
 import subprocess
 import requests
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from config import (
     GEMINI_API_BASE_URL, GEMINI_API_KEY, GEMINI_TEMPERATURE,
     AUDIO_EXTENSIONS, GEMINI_AUDIO_MIME_TYPES, AUDIO_CODEC_TO_EXT,
     FFMPEG_SAMPLE_RATE, FFMPEG_CHANNELS, 
     FFMPEG_BITRATE, FFMPEG_FORMAT, FFMPEG_TIMEOUT, FFPROBE_TIMEOUT,
-    MAX_FILE_SIZE_MB, MAX_INLINE_AUDIO_MB, GEMINI_MAX_OUTPUT_TOKENS
+    MAX_FILE_SIZE_MB, MAX_INLINE_AUDIO_MB, GEMINI_MAX_OUTPUT_TOKENS,
+    API_TIMEOUT,
+    ELEVENLABS_API_KEY, ELEVENLABS_STT_URL, ELEVENLABS_MODEL_ID,
+    ELEVENLABS_LANGUAGE_CODE, ELEVENLABS_TIMESTAMPS_GRANULARITY,
+    DEFAULT_TRANSCRIPTION_PROVIDER
 )
 from logger import setup_logger
 
 logger = setup_logger(__name__)
 
 
-class GeminiAPIError(Exception):
-    """Custom exception for Gemini API errors with detailed information."""
+class TranscriptionAPIError(Exception):
+    """Base exception for transcription API errors with detailed information."""
     
     def __init__(self, message: str, error_type: str = "UNKNOWN", response_data: dict = None):
         """
-        Initialize Gemini API error.
+        Initialize a transcription API error.
         
         Args:
             message: Human-readable error message
@@ -35,6 +39,22 @@ class GeminiAPIError(Exception):
         super().__init__(message)
         self.error_type = error_type
         self.response_data = response_data or {}
+        # Used by the chunk processor to carry partial results when a chunk fails.
+        self.partial_results = None
+
+
+class GeminiAPIError(TranscriptionAPIError):
+    """Custom exception for Gemini API errors with detailed information."""
+
+    def __init__(self, message: str, error_type: str = "UNKNOWN", response_data: dict = None):
+        super().__init__(message, error_type=error_type, response_data=response_data)
+
+
+class ElevenLabsAPIError(TranscriptionAPIError):
+    """Custom exception for ElevenLabs Speech-to-Text (Scribe) API errors."""
+
+    def __init__(self, message: str, error_type: str = "UNKNOWN", response_data: dict = None):
+        super().__init__(message, error_type=error_type, response_data=response_data)
 
 def get_media_duration(file_path: str) -> Optional[float]:
     """
@@ -610,6 +630,250 @@ def query_gemini_transcription(audio_path: str, output_format: str = "txt",
     logger.info("Transcription completed successfully")
     return transcript
 
+def _parse_elevenlabs_error(response) -> Tuple[str, str]:
+    """
+    Parse an ElevenLabs error response to extract error type and message.
+
+    ElevenLabs returns errors like:
+        {"detail": {"status": "invalid_api_key", "message": "..."}}
+
+    Args:
+        response: The HTTP response object from the ElevenLabs API
+
+    Returns:
+        Tuple of (error_type, error_message)
+    """
+    try:
+        error_json = response.json()
+        detail = error_json.get("detail")
+        if isinstance(detail, dict):
+            status = str(detail.get("status", ""))
+            message = detail.get("message", response.text)
+            if response.status_code == 401 or "api_key" in status.lower():
+                return "INVALID_API_KEY", f"Invalid API key: {message}"
+            if response.status_code == 429 or "quota" in status.lower():
+                return "QUOTA_EXCEEDED", f"API quota exceeded: {message}"
+            if response.status_code == 400:
+                return "BAD_REQUEST", f"Invalid request: {message}"
+            return "API_ERROR", message
+        if isinstance(detail, str):
+            return "API_ERROR", detail
+    except Exception:
+        pass
+
+    return "API_ERROR", f"ElevenLabs API request failed with status {response.status_code}: {response.text}"
+
+
+def _format_srt_timestamp(seconds: float) -> str:
+    """Convert a time in seconds to an SRT timestamp (HH:MM:SS,mmm)."""
+    millis = int(round(seconds * 1000))
+    hours = millis // 3600000
+    millis %= 3600000
+    mins = millis // 60000
+    millis %= 60000
+    secs = millis // 1000
+    millis %= 1000
+    return f"{hours:02d}:{mins:02d}:{secs:02d},{millis:03d}"
+
+
+def _format_vtt_timestamp(seconds: float) -> str:
+    """Convert a time in seconds to a WebVTT timestamp (HH:MM:SS.mmm)."""
+    return _format_srt_timestamp(seconds).replace(",", ".")
+
+
+def _group_words_into_segments(words: List[dict], max_chars: int = 80,
+                               max_gap: float = 1.5) -> List[dict]:
+    """
+    Group word-level timestamps into subtitle-sized segments.
+
+    Args:
+        words: List of word dicts with 'text', 'start', 'end', 'type' keys
+               (as returned by the ElevenLabs Scribe API).
+        max_chars: Approximate maximum characters per segment.
+        max_gap: Maximum silence gap (seconds) between consecutive words that
+                 still keeps them within the same segment.
+
+    Returns:
+        List of segments: [{'start': float, 'end': float, 'text': str}]
+    """
+    segments: List[dict] = []
+    current_words: List[str] = []
+    current_start: Optional[float] = None
+    prev_end: Optional[float] = None
+
+    for word in words:
+        if not isinstance(word, dict):
+            continue
+        # Skip spacing tokens (ElevenLabs emits "spacing" entries between words)
+        if word.get("type") not in (None, "word"):
+            continue
+        text = (word.get("text") or "").strip()
+        start = word.get("start")
+        end = word.get("end")
+        if not text or start is None or end is None:
+            continue
+
+        # Break on a noticeable silence gap
+        if current_words and prev_end is not None and (start - prev_end) > max_gap:
+            segments.append({
+                "start": current_start,
+                "end": prev_end,
+                "text": " ".join(current_words)
+            })
+            current_words = []
+            current_start = None
+
+        if not current_words:
+            current_start = start
+        current_words.append(text)
+        prev_end = end
+
+        # Break when the segment grows too long
+        if len(" ".join(current_words)) >= max_chars:
+            segments.append({
+                "start": current_start,
+                "end": prev_end,
+                "text": " ".join(current_words)
+            })
+            current_words = []
+            current_start = None
+
+    if current_words:
+        segments.append({
+            "start": current_start,
+            "end": prev_end,
+            "text": " ".join(current_words)
+        })
+
+    return segments
+
+
+def _build_srt_from_segments(segments: List[dict]) -> str:
+    """Build a SubRip (SRT) string from timestamped segments."""
+    if not segments:
+        return _get_silence_response("srt")
+    blocks = []
+    for i, seg in enumerate(segments, 1):
+        start_ts = _format_srt_timestamp(seg["start"])
+        end_ts = _format_srt_timestamp(seg["end"])
+        blocks.append(f"{i}\n{start_ts} --> {end_ts}\n{seg['text']}")
+    return "\n\n".join(blocks) + "\n"
+
+
+def _build_vtt_from_segments(segments: List[dict]) -> str:
+    """Build a WebVTT string from timestamped segments."""
+    if not segments:
+        return _get_silence_response("vtt")
+    blocks = []
+    for seg in segments:
+        start_ts = _format_vtt_timestamp(seg["start"])
+        end_ts = _format_vtt_timestamp(seg["end"])
+        blocks.append(f"{start_ts} --> {end_ts}\n{seg['text']}")
+    return "WEBVTT\n\n" + "\n\n".join(blocks) + "\n"
+
+
+def _build_json_from_segments(segments: List[dict]) -> str:
+    """Build a JSON array string from timestamped segments."""
+    if not segments:
+        return _get_silence_response("json")
+    data = [
+        {"start": round(seg["start"], 3), "end": round(seg["end"], 3), "text": seg["text"]}
+        for seg in segments
+    ]
+    return json.dumps(data, indent=2, ensure_ascii=False)
+
+
+def query_elevenlabs_transcription(audio_path: str, output_format: str = "txt",
+                                   prompt_enhancement: Optional[str] = None,
+                                   language_code: Optional[str] = None) -> str:
+    """
+    Upload a media file to the ElevenLabs Speech-to-Text (Scribe) API.
+
+    Args:
+        audio_path: Path to the media file to transcribe
+        output_format: Output format (txt, srt, vtt, json)
+        prompt_enhancement: NOTE: ElevenLabs Scribe has no free-text instruction
+            field, so this is accepted for API compatibility but is not applied.
+        language_code: Optional ISO-639-1/3 language code (None -> auto-detect)
+
+    Returns:
+        The transcribed text in the requested format
+
+    Raises:
+        FileNotFoundError: If the media file doesn't exist
+        ElevenLabsAPIError: If the API request fails or the response is invalid
+    """
+    if not os.path.exists(audio_path):
+        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+    if not ELEVENLABS_API_KEY:
+        raise ElevenLabsAPIError(
+            "ElevenLabs API key is not set. Set the ELEVENLABS_API_KEY environment variable.",
+            error_type="MISSING_API_KEY"
+        )
+
+    if prompt_enhancement:
+        logger.info(
+            "prompt_enhancement is not supported by the ElevenLabs Scribe API and will be ignored."
+        )
+
+    headers = {"xi-api-key": ELEVENLABS_API_KEY}
+    data = {
+        "model_id": ELEVENLABS_MODEL_ID,
+        "timestamps_granularity": ELEVENLABS_TIMESTAMPS_GRANULARITY,
+    }
+    if language_code:
+        data["language_code"] = language_code
+    elif ELEVENLABS_LANGUAGE_CODE:
+        data["language_code"] = ELEVENLABS_LANGUAGE_CODE
+
+    logger.info("Sending transcription request to ElevenLabs Scribe API...")
+    with open(audio_path, "rb") as f:
+        files = {"file": (os.path.basename(audio_path), f)}
+        response = requests.post(
+            ELEVENLABS_STT_URL,
+            headers=headers,
+            data=data,
+            files=files,
+            timeout=API_TIMEOUT,
+        )
+
+    if response.status_code != 200:
+        logger.error(f"ElevenLabs API request failed with status {response.status_code}")
+        error_type, error_msg = _parse_elevenlabs_error(response)
+        raise ElevenLabsAPIError(
+            error_msg,
+            error_type=error_type,
+            response_data={"status": response.status_code, "text": response.text},
+        )
+
+    try:
+        response_json = response.json()
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to decode JSON response: {e}")
+        raise ElevenLabsAPIError(
+            f"Invalid JSON response from ElevenLabs API: {response.text}",
+            error_type="INVALID_RESPONSE",
+        )
+
+    text = (response_json.get("text") or "").strip()
+    words = response_json.get("words") or []
+    logger.info("ElevenLabs transcription completed successfully")
+
+    if output_format == "txt":
+        return text if text else "[Silence]"
+
+    segments = _group_words_into_segments(words)
+    if output_format == "srt":
+        return _build_srt_from_segments(segments)
+    elif output_format == "vtt":
+        return _build_vtt_from_segments(segments)
+    elif output_format == "json":
+        return _build_json_from_segments(segments)
+    else:
+        return text if text else "[Silence]"
+
+
 def _should_use_direct_send(file_path: str) -> Tuple[bool, Optional[str], Optional[str]]:
     """
     Determine if a file can be sent directly to Gemini without re-encoding.
@@ -676,7 +940,8 @@ def _make_audio_path(source_path: str, suffix: str, temp_dir: Optional[str] = No
 def transcribe_file(file_path: str, output_format: str = "txt", 
                     prompt_enhancement: Optional[str] = None,
                     _error_collector: Optional[dict] = None,
-                    temp_dir: Optional[str] = None) -> str:
+                    temp_dir: Optional[str] = None,
+                    provider: Optional[str] = None) -> str:
     """
     High-level function to transcribe a video or audio file.
     
@@ -693,7 +958,9 @@ def transcribe_file(file_path: str, output_format: str = "txt",
         temp_dir: Optional directory for temporary audio files. If None, uses the
                   system temp dir. Pass the chunk directory to co-locate temp audio
                   files with the video chunks.
-        
+        provider: Optional transcription provider override. One of "elevenlabs" or
+                  "gemini". If None, defaults to DEFAULT_TRANSCRIPTION_PROVIDER.
+
     Returns:
         The transcribed text in the requested format
         
@@ -702,6 +969,10 @@ def transcribe_file(file_path: str, output_format: str = "txt",
         subprocess.CalledProcessError: If ffmpeg processing fails
         ValueError: If the API request fails
     """
+    if provider is None:
+        provider = DEFAULT_TRANSCRIPTION_PROVIDER
+    provider = provider.lower()
+
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Input file not found: {file_path}")
         
@@ -798,9 +1069,14 @@ def transcribe_file(file_path: str, output_format: str = "txt",
                 active_audio_path = extract_audio(file_path, temp_audio_file)
                 mime_type = "audio/mp3"
         
-        transcript = query_gemini_transcription(
-            active_audio_path, output_format, prompt_enhancement, mime_type
-        )
+        if provider == "elevenlabs":
+            transcript = query_elevenlabs_transcription(
+                active_audio_path, output_format, prompt_enhancement
+            )
+        else:
+            transcript = query_gemini_transcription(
+                active_audio_path, output_format, prompt_enhancement, mime_type
+            )
         # Mark success so finally block knows it can clean up
         if _error_collector is not None:
             _error_collector['success'] = True
